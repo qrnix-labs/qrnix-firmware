@@ -708,7 +708,7 @@ void update_boot_splash() {
 
     display.clearDisplay();
     display.setCursor(0, 0);
-    display.println("SquelchBox");
+    display.println("QRNix");
     display.println("HF Noise Reduction");
     display.print("Firmware v");
     display.println(SOFTWARE_VERSION);
@@ -724,9 +724,9 @@ void update_display() {
     display.setCursor(0, 0);
 
     // Line 1 — mode; the whole line inverts as the CLIP indicator
-    const char *mode_str = (current_mode == 2) ? "Squelch Box Adaptive"
-                         : (current_mode == 1) ? "Squelch Box Spectral"
-                         :                       "Squelch Box Bypass";
+    const char *mode_str = (current_mode == 2) ? "QRNix Adaptive"
+                         : (current_mode == 1) ? "QRNix Spectral"
+                         :                       "QRNix Bypass";
     if ((int32_t)(clip_latch_until - millis()) > 0) {
         display.fillRect(0, 0, 128, 16, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);

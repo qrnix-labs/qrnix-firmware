@@ -9,7 +9,7 @@
 #   scripts/release.sh                 # next patch version from latest tag
 #   scripts/release.sh v0.3.10         # explicit version
 #   scripts/release.sh v0.3.10 -y      # skip the confirmation prompt
-#   scripts/release.sh v0.3.10 --dry-run  # rehearsal: no tag, no push, no publish
+#   scripts/release.sh v0.3.10 --dry-run  # rehearsal: no commit, no tag, no push, no publish
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -20,6 +20,21 @@ ELF="${BUILD_DIR}/firmware.elf"
 HEX="${BUILD_DIR}/firmware.hex"
 DIST_DIR="dist"
 SRC="src/qrnix.cpp"
+
+# Dry-run rehearsal backups: a --dry-run applies the version bump and
+# changelog temporarily and restores them via this EXIT trap, so a rehearsal
+# (even a failed one) never leaves the tree modified or a commit behind.
+NOTES=""
+PREP_BAK_SRC=""
+PREP_BAK_LOG=""
+cleanup() {
+  [[ -n "$NOTES" ]] && rm -f "$NOTES"
+  if [[ -n "$PREP_BAK_SRC" ]]; then
+    mv -f "$PREP_BAK_SRC" "$SRC"
+    mv -f "$PREP_BAK_LOG" CHANGELOG.md
+  fi
+}
+trap cleanup EXIT
 
 # Mode flag may come first (release.sh --dry-run) or after the version.
 if [[ "${1:-}" == "--dry-run" || "${1:-}" == "-y" ]]; then
@@ -85,6 +100,9 @@ if [[ -z "$PREV" ]]; then
 fi
 
 # ── prep: bump version, regenerate changelog, commit (idempotent) ─────────
+# Real runs commit "Prepare release $TAG". Dry runs apply the same bump and
+# changelog temporarily and restore them on exit, so the rehearsal exercises
+# the real build/assert path with zero state change.
 PREP_DONE=0
 if [[ "$(git log -1 --format=%s)" == "Prepare release $TAG" ]]; then
   if grep -q "SOFTWARE_VERSION = \"$VERSION\"" "$SRC"; then
@@ -97,17 +115,21 @@ if [[ "$(git log -1 --format=%s)" == "Prepare release $TAG" ]]; then
 fi
 
 if ((!PREP_DONE)); then
-  # Clean-start requirement: main must be in sync with origin before the
-  # driver creates the prep commit.
-  git fetch origin
-  if ! git rev-parse -q --verify origin/main >/dev/null; then
-    echo "error: origin/main does not exist; push main first" >&2
-    exit 1
+  if ((!DRY_RUN)); then
+    # Clean-start requirement: main must be in sync with origin before the
+    # driver creates the prep commit. A rehearsal does not commit, so it
+    # does not need sync.
+    git fetch origin
+    if ! git rev-parse -q --verify origin/main >/dev/null; then
+      echo "error: origin/main does not exist; push main first" >&2
+      exit 1
+    fi
+    if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+      echo "error: main is not in sync with origin/main; push or pull first" >&2
+      exit 1
+    fi
   fi
-  if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
-    echo "error: main is not in sync with origin/main; push or pull first" >&2
-    exit 1
-  fi
+
   if [[ -z "$PREV" ]]; then
     COUNT="$(git rev-list --count HEAD)"
   else
@@ -118,18 +140,30 @@ if ((!PREP_DONE)); then
     exit 1
   fi
 
+  if ((DRY_RUN)); then
+    # Rehearsal: snapshot the tree so the temporary bump can be restored on
+    # exit. Nothing is committed or tagged.
+    PREP_BAK_SRC="$(mktemp)"
+    PREP_BAK_LOG="$(mktemp)"
+    cp -p "$SRC" "$PREP_BAK_SRC"
+    cp -p CHANGELOG.md "$PREP_BAK_LOG"
+    echo "dry-run: applying temporary version bump to $VERSION (restored on exit)"
+  fi
+
   # Version bump in the source; the build assert re-verifies it later.
   sed -i "s/SOFTWARE_VERSION = \"[^\"]*\"/SOFTWARE_VERSION = \"$VERSION\"/" "$SRC"
   grep -q "SOFTWARE_VERSION = \"$VERSION\"" "$SRC" || { echo "error: version bump failed in $SRC" >&2; exit 1; }
   git-cliff -o CHANGELOG.md
-  git add "$SRC" CHANGELOG.md
-  git commit -q -m "Prepare release $TAG"
-  echo "prep committed: Prepare release $TAG"
+
+  if ((!DRY_RUN)); then
+    git add "$SRC" CHANGELOG.md
+    git commit -q -m "Prepare release $TAG"
+    echo "prep committed: Prepare release $TAG"
+  fi
 fi
 
 # ── release notes from the commit log ─────────────────────────────────────
 NOTES="$(mktemp)"
-trap 'rm -f "$NOTES"' EXIT
 if ((TAG_EXISTS)); then
   git-cliff "${PREV}..${TAG}" >"$NOTES"
 else

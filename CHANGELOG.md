@@ -2,6 +2,11 @@
 
 ### 🐛 Bug Fixes
 
+- Render proper version header in release notes
+## [0.3.8] - 2026-08-20
+
+### 🐛 Bug Fixes
+
 - Correct release digest check and repo extraction
 ## [0.3.7] - 2026-08-20
 

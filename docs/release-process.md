@@ -111,23 +111,41 @@ Dry run (build, assert, package; no tag, no push, no publish):
 scripts/release.sh v0.3.6 --dry-run
 ```
 
-### 4. Verify the published artifacts
+### 4. Verify the release
 
-```bash
-sha256sum dist/qrnix-teensy40-v0.3.6.hex
+The script's digest check (step 9) is the authoritative verification: if it
+printed
+
+```
+verified: GitHub digest <hash> matches the local build
 ```
 
-Compare the output with the `sha256:` digest shown next to the asset on the
-release page (it has a copy button). GitHub computes that digest from the
-uploaded bytes, so a match proves the download is byte-identical to the
-released build. The release script performs the same comparison
-automatically after each upload.
+then the uploaded bytes are byte-identical to the build from the tagged
+commit. No manual comparison is needed for the release. Confirm the release
+looks right:
 
-The device boot splash shows `0.3.6`, the release title says `v0.3.6`, and
-the checksum matches: three independent confirmations of what is on the
-hardware. The hash guarantees the downloaded hex is byte-identical to what
-was built from the tagged commit; it does not by itself prove authenticity
-(that would need a signed checksum file) or bit-reproducible builds.
+```bash
+gh release view v0.3.6
+```
+
+### 5. What users verify
+
+Users cannot run the release script, so they verify by hand:
+
+```bash
+sha256sum qrnix-teensy40-v0.3.6.hex
+```
+
+and compare the output with the `sha256:` digest shown next to the asset on
+the release page (it has a copy button). GitHub computes that digest from
+the uploaded bytes, so a match proves the downloaded file is byte-identical
+to the released build. This is the same comparison the script performs
+automatically after each upload; maintainers only need it when auditing a
+release or simulating the user path.
+
+The hash guarantees byte-identity with the released build; it does not by
+itself prove authenticity (that would need a signed checksum file) or
+bit-reproducible builds.
 
 ## Error handling
 
@@ -148,3 +166,6 @@ was built from the tagged commit; it does not by itself prove authenticity
   `SHA256SUMS` asset was dropped: GitHub computes a per-asset sha256 digest
   on upload, and the release script asserts that digest equals the local
   build hash after publishing.
+- 2026-08-20: verification section clarified: the script's digest check is
+  authoritative for maintainers; the manual page-digest comparison is for
+  users and audits.

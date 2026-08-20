@@ -3,6 +3,11 @@
 ### 🐛 Bug Fixes
 
 - Render proper version header in release notes
+## [0.3.9] - 2026-08-20
+
+### 🐛 Bug Fixes
+
+- Render proper version header in release notes
 ## [0.3.8] - 2026-08-20
 
 ### 🐛 Bug Fixes

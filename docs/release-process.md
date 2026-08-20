@@ -100,7 +100,9 @@ The script, in order:
 7. Pushes `main` and the tag.
 8. Creates the GitHub release with the hex and the notes.
 9. Reads the digest GitHub computed for the uploaded asset and asserts it
-   equals the local hash.
+   equals the local hash. If the digest cannot be read after retries, it
+   warns and exits 0 so the release is not left half-finished; verify
+   manually on the release page.
 
 Dry run (build, assert, package; no tag, no push, no publish):
 

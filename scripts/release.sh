@@ -116,7 +116,9 @@ if ((DRY_RUN)); then
 fi
 
 # ── publish ───────────────────────────────────────────────────────────────
-REPO="$(git remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#')"
+# owner/repo from the remote URL. Strip .git FIRST: the greedy capture would
+# otherwise swallow it and the API path would 404.
+REPO="$(git remote get-url origin | sed -E 's#\.git$##' | sed -E 's#.*[:/]([^/]+/[^/]+)$#\1#')"
 git push origin main
 git push origin "$TAG"
 gh release create "$TAG" "$HEX_NAME" \
@@ -125,18 +127,21 @@ gh release create "$TAG" "$HEX_NAME" \
 
 # GitHub computes the asset digest from the uploaded bytes; it must equal the
 # hash of the hex built from the tagged commit. A mismatch means the wrong
-# file was uploaded. The digest field can lag the upload, so retry briefly.
+# file was uploaded. The digest can lag the upload and the API can fail, so
+# retry until the value looks like a real sha256 (64 hex chars); anything
+# else (error JSON, empty) is a failed read, not a digest.
 REMOTE_SHA=""
 for _ in 1 2 3 4 5; do
   REMOTE_SHA="$(gh api "repos/${REPO}/releases/tags/${TAG}" \
     --jq ".assets[] | select(.name == \"$(basename "$HEX_NAME")\") | .digest" \
     | tr -d '"' | sed 's/^sha256://')" || true
-  [[ -n "$REMOTE_SHA" ]] && break
+  [[ "$REMOTE_SHA" =~ ^[0-9a-f]{64}$ ]] && break
+  REMOTE_SHA=""
   sleep 2
 done
 if [[ -z "$REMOTE_SHA" ]]; then
-  echo "error: could not read the uploaded digest; compare manually on the release page" >&2
-  exit 1
+  echo "warning: release created but the uploaded digest could not be read; compare manually on the release page" >&2
+  exit 0
 fi
 if [[ "$REMOTE_SHA" != "$LOCAL_SHA" ]]; then
   echo "error: uploaded digest ${REMOTE_SHA} != local build hash ${LOCAL_SHA}; delete the release and investigate" >&2

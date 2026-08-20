@@ -4,3 +4,4 @@
 .vscode/
 *.hex
 *.elf
+dist/

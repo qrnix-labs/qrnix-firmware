@@ -1,5 +1,10 @@
 ## [unreleased]
 
+### 💼 Other
+
+- One-command release driver
+## [0.3.10] - 2026-08-20
+
 ### 🐛 Bug Fixes
 
 - Render proper version header in release notes

@@ -44,8 +44,10 @@ mv git-cliff-2.13.1/git-cliff ~/.local/bin/
 ```
 
 Note: the tarball's top-level directory is `git-cliff-<version>` (no arch
-suffix). The built-in defaults work without a `cliff.toml`; run
-`git-cliff --init` only to customize sections or add links.
+suffix). The repo ships a `cliff.toml`: it groups commits (`build:` lands
+under Build System), excludes `Prepare release` commits, and disables
+filtering so runs stay warning-free. Customize with `git-cliff --init`
+(saves the full default config) or edit the file directly.
 
 Useful commands:
 
@@ -174,3 +176,6 @@ bit-reproducible builds.
   origin sync, unreleased commits), automated version bump in
   `src/qrnix.cpp`, changelog regeneration, confirmation prompt, "QRNix vX.Y.Z"
   release titles.
+- 2026-08-20: added `cliff.toml`: `build:` grouped under Build System,
+  `Prepare release` commits excluded, unconventional commits kept (no more
+  "skipped due to parse error" warnings).

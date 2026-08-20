@@ -34,6 +34,34 @@ The repo is **LGPL 2.1-or-later**:
 - Test what you changed: build, flash, and verify over the serial monitor.
   State in the PR what you tested and what you did not.
 
+## Commit messages
+
+Changelogs are generated from the commit log (see
+[docs/release-process.md](docs/release-process.md)), so subjects start with
+a type prefix:
+
+| Type | Use for |
+|---|---|
+| `feat:` | new feature |
+| `fix:` | bug fix |
+| `docs:` | documentation |
+| `refactor:` | restructuring, no behavior change |
+| `build:` | build system, tooling, release process |
+| `chore:` | maintenance |
+| `perf:` / `style:` / `test:` | performance, formatting, tests |
+
+A scope is optional (`feat(ui): ...`); a `!` marks a breaking change
+(`feat!: ...`).
+
+The `.githooks/commit-msg` hook enforces this. Install it once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The release driver's `Prepare release vX.Y.Z` commits and git's own
+merge/revert commits are exempt.
+
 ## What makes a good PR
 
 - One logical change per PR.

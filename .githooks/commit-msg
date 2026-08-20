@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# commit-msg hook: enforce conventional commit subjects.
+# Install once: git config core.hooksPath .githooks
+#
+# Exemptions (git-generated or driver-generated, not user commits):
+#   - "Prepare release vX.Y.Z" (created by scripts/release.sh)
+#   - "Merge ..." (created by git merge)
+#   - "Revert \"...\"" (created by git revert)
+set -u
+
+MSG_FILE="${1:?commit-msg hook requires a message file}"
+SUBJECT="$(sed -n '1p' "$MSG_FILE")"
+SUBJECT="${SUBJECT%"${SUBJECT##*[![:space:]]}"}"   # trim trailing whitespace
+
+# Regexes in variables: bash's [[ =~ ]] parser mishandles bare grouping
+# parens in an inline pattern.
+PREPARE='^Prepare release v[0-9]+\.[0-9]+\.[0-9]+$'
+CONVENTIONAL='^(feat|fix|docs|refactor|build|chore|perf|style|test|revert)(\([^)]+\))?!?:'
+
+# Driver-generated release prep commit.
+if [[ "$SUBJECT" =~ $PREPARE ]]; then
+  exit 0
+fi
+
+# Git-generated merge and revert commits.
+if [[ "$SUBJECT" =~ ^Merge\  ]] || [[ "$SUBJECT" =~ ^Revert\ \" ]]; then
+  exit 0
+fi
+
+# Conventional commit: type(optional scope)!: subject
+if [[ "$SUBJECT" =~ $CONVENTIONAL ]]; then
+  exit 0
+fi
+
+echo "commit-msg: subject does not follow the conventional format" >&2
+echo "  allowed types: feat fix docs refactor build chore perf style test revert" >&2
+echo "  examples: fix: correct gain smoothing | feat(ui): add OLED screen | feat!: breaking" >&2
+echo "  'Prepare release vX.Y.Z' (release driver) and git merge/revert are exempt" >&2
+exit 1

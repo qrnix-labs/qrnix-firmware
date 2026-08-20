@@ -89,8 +89,9 @@ The script, in order:
 
 1. Checks prerequisites (tools, `main` branch, clean tracked tree; the tag
    must not exist, or must exist and point at HEAD).
-2. Generates release notes from the commit log (`git-cliff --unreleased`, or
-   the `v0.3.5..v0.3.6` range when the tag already exists; `git log` fallback)
+2. Generates release notes from the commit log (`git-cliff --unreleased
+   --tag v0.3.6` so the section is named before the tag exists, or the
+   `v0.3.5..v0.3.6` range when the tag already exists; `git log` fallback)
    and shows them for review.
 3. Creates annotated tag `v0.3.6` if it does not exist yet, otherwise reuses
    it.

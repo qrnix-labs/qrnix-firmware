@@ -70,7 +70,9 @@ if command -v git-cliff >/dev/null; then
   if ((TAG_EXISTS)); then
     git-cliff "${PREV}..${TAG}" >"$NOTES"
   else
-    git-cliff --unreleased >"$NOTES"
+    # --tag names the section before the tag exists; without it the notes
+    # would ship with a literal "## [unreleased]" header on the release page.
+    git-cliff --unreleased --tag "$TAG" >"$NOTES"
   fi
 else
   if ((TAG_EXISTS)); then

@@ -62,54 +62,53 @@ The user-visible version is `SOFTWARE_VERSION` in `src/qrnix.cpp:85`. It is
 edited by hand during release prep; `scripts/release.sh` asserts that the
 compiled string matches the tag before anything is published.
 
-## Release steps (example: v0.3.6)
+## Release steps (example: v0.3.7)
 
 ### 1. Develop
 
-Merge `feat:`/`fix:` commits to `main` using the prefix convention.
+Merge `feat:`/`fix:` commits to `main` using the prefix convention. This is
+the only manual step before the release; the driver refuses to start if
+there is nothing to ship.
 
-### 2. Prepare the release
+### 2. Release (one command)
 
-```bash
-git-cliff --unreleased          # review what the notes will say
-```
-
-1. Edit `src/qrnix.cpp:85`: `SOFTWARE_VERSION` `"0.3.5"` -> `"0.3.6"`.
-2. `git-cliff -o CHANGELOG.md` to regenerate the full changelog.
-3. Commit: `git add -A && git commit -m "Prepare release v0.3.6"`.
-4. `git push origin main`.
-
-### 3. Release
+The driver does the whole release: pre-flight, version bump in
+`src/qrnix.cpp`, changelog regeneration, notes, tag, build, assert,
+packaging, push, GitHub release, digest verification.
 
 ```bash
-scripts/release.sh v0.3.6
+scripts/release.sh                  # next patch version (latest tag + 1)
+scripts/release.sh v0.3.7           # explicit version
+scripts/release.sh v0.3.7 -y        # skip the confirmation prompt
+scripts/release.sh v0.3.7 --dry-run # rehearsal: no tag, no push, no publish
 ```
 
-The script, in order:
+In order, the script:
 
-1. Checks prerequisites (tools, `main` branch, clean tracked tree; the tag
-   must not exist, or must exist and point at HEAD).
-2. Generates release notes from the commit log (`git-cliff --unreleased
-   --tag v0.3.6` so the section is named before the tag exists, or the
-   `v0.3.5..v0.3.6` range when the tag already exists; `git log` fallback)
-   and shows them for review.
-3. Creates annotated tag `v0.3.6` if it does not exist yet, otherwise reuses
+1. Pre-flight: tools present, on `main`, clean tracked tree, tag state
+   (must not exist, or exist and point at HEAD).
+2. Prep (only when not already done for this version): checks `main` is in
+   sync with `origin/main`, checks there are unreleased commits, bumps
+   `SOFTWARE_VERSION` in `src/qrnix.cpp:85` to `0.3.7`, regenerates
+   `CHANGELOG.md`, commits "Prepare release v0.3.7". Idempotent: a re-run
+   after a failed release reuses the existing prep commit.
+3. Generates release notes (`git-cliff --unreleased --tag v0.3.7`) and shows
+   them for review.
+4. Asks for confirmation (skipped with `-y`).
+5. Creates annotated tag `v0.3.7` if it does not exist yet, otherwise reuses
    it.
-4. Builds: `pio run -e teensy40`.
-5. Asserts `firmware.elf` contains the version string `0.3.6`.
-6. Packages `dist/qrnix-teensy40-v0.3.6.hex` and hashes it locally.
-7. Pushes `main` and the tag.
-8. Creates the GitHub release with the hex and the notes.
-9. Reads the digest GitHub computed for the uploaded asset and asserts it
-   equals the local hash. If the digest cannot be read after retries, it
-   warns and exits 0 so the release is not left half-finished; verify
-   manually on the release page.
+6. Builds: `pio run -e teensy40`.
+7. Asserts `firmware.elf` contains the version string `0.3.7`.
+8. Packages `dist/qrnix-teensy40-v0.3.7.hex` and hashes it locally.
+9. Pushes `main` and the tag.
+10. Creates the GitHub release "QRNix v0.3.7" with the hex and the notes.
+11. Reads the digest GitHub computed for the uploaded asset and asserts it
+    equals the local hash. If the digest cannot be read after retries, it
+    warns and exits 0 so the release is not left half-finished; verify
+    manually on the release page.
 
-Dry run (build, assert, package; no tag, no push, no publish):
-
-```bash
-scripts/release.sh v0.3.6 --dry-run
-```
+The dry run also performs the prep (the prep commit stays local), so the
+rehearsal exercises the real tree; re-running is idempotent.
 
 ### 4. Verify the release
 
@@ -149,13 +148,15 @@ bit-reproducible builds.
 
 ## Error handling
 
+- The driver refuses to start the prep if `main` has unpushed commits or is
+  behind `origin/main`: push or pull first, then re-run.
 - Version mismatch or build failure before the tag is pushed: fix, commit,
-  delete the tag (`git tag -d v0.3.6`), re-run.
+  delete the tag (`git tag -d v0.3.7`), re-run.
 - Publish step fails after the tag was pushed: the tag exists and points at
   HEAD, so the script reuses it and re-runs cleanly. A tag pointing at a
   different commit is refused; fix that deliberately.
 - Bug found after publishing: never touch the released tag. Fix on `main`
-  and release `v0.3.7`; its changelog diff `v0.3.6..v0.3.7` contains exactly
+  and release `v0.3.8`; its changelog diff `v0.3.7..v0.3.8` contains exactly
   the fix commits.
 
 ## History
@@ -169,3 +170,7 @@ bit-reproducible builds.
 - 2026-08-20: verification section clarified: the script's digest check is
   authoritative for maintainers; the manual page-digest comparison is for
   users and audits.
+- 2026-08-20: release became a one-command driver: pre-flight (clean tree,
+  origin sync, unreleased commits), automated version bump in
+  `src/qrnix.cpp`, changelog regeneration, confirmation prompt, "QRNix vX.Y.Z"
+  release titles.

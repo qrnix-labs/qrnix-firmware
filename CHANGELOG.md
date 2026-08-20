@@ -1,5 +1,9 @@
 ## [unreleased]
 
+### 🐛 Bug Fixes
+
+- Make release --dry-run a true rehearsal (no commit)
+
 ### 🛠️ Build System
 
 - Add commit-msg hook and document convention

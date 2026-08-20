@@ -82,7 +82,7 @@ bool specbleach_adaptive_get_diagnostics(SpectralBleachHandle instance,
 
 // 30 dB leaves about 3.16% of the rejected spectrum's amplitude.
 constexpr float REDUCTION_MAX_DB = 30.0f;
-constexpr const char *SOFTWARE_VERSION = "0.3.7";
+constexpr const char *SOFTWARE_VERSION = "0.3.8";
 constexpr unsigned long BOOT_SPLASH_MS = 2000;
 
 // ── Audio pipeline ───────────────────────────────────────────────────────────

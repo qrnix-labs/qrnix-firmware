@@ -35,6 +35,9 @@
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
+#include <string.h>
+
+#include "serial_contract.h"
 
 extern "C" {
 #include "specbleach_denoiser.h"    // NR1 API + SpectralBleachParameters struct
@@ -164,6 +167,33 @@ void sync_tk_bypass_processor();
 void update_boot_splash();
 void update_display();
 float mapfloat(float x, float in_min, float in_max, float out_min, float out_max);
+// ── Wire contract emission (ADR-0003) ───────────────────────────────────────
+
+static void emit_boot_line(const char *stage) {
+    char line[160];
+    contract_boot_line(line, sizeof(line), stage);
+    Serial.println(line);
+}
+
+static void emit_crash_line(const char *detail) {
+    char line[512];
+    contract_crash_line(line, sizeof(line), detail);
+    Serial.println(line);
+}
+
+// Captures a Printable (CrashReport) into a buffer for per-line emission.
+struct BufPrint : public Print {
+    char *buf;
+    size_t cap;
+    size_t n;
+    BufPrint(char *b, size_t c) : buf(b), cap(c), n(0) {}
+    size_t write(uint8_t byte) override {
+        if (n + 1 < cap) {
+            buf[n++] = (char)byte;
+        }
+        return 1;
+    }
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  SETUP
@@ -176,24 +206,36 @@ void setup() {
     while (!Serial && millis() - serial_wait_start < 3000) {
         yield();
     }
-    Serial.println("setup: USB serial ready");
+    emit_boot_line("USB serial ready");
     if (CrashReport) {
-        Serial.print(CrashReport);
+        char report[512];
+        BufPrint sink(report, sizeof(report));
+        CrashReport.printTo(sink);
+        report[sink.n] = '\0';
+        char *line = report;
+        for (char *nl = strchr(line, '\n'); nl != NULL; nl = strchr(line, '\n')) {
+            *nl = '\0';
+            emit_crash_line(line);
+            line = nl + 1;
+        }
+        if (*line != '\0') {
+            emit_crash_line(line);
+        }
     }
 
     // -- Audio memory pool (60 × 128-sample blocks = ~15 KB) -------------------
     AudioMemory(60);
-    Serial.println("setup: audio memory ready");
+    emit_boot_line("audio memory ready");
 
     // -- Codec setup -----------------------------------------------------------
-    Serial.println("setup: starting codec");
+    emit_boot_line("starting codec");
     codec.enable();
     codec.inputSelect(AUDIO_INPUT_LINEIN);
     codec.lineInLevel(15);      // maximum sensitivity (0.24 Vpp full scale)
     codec.volume(0.65);         // output level
     record_queue_l.begin();     // left input drives both line-output channels
     record_queue_r.begin();     // right input is monitored but not processed
-    Serial.println("setup: codec ready");
+    emit_boot_line("codec ready");
 
     // -- Controls and NR initialisation ----------------------------------------
     // SPDT ON-OFF-ON switch: common to GND, outer terminals to D3 and D4.
@@ -207,7 +249,7 @@ void setup() {
     }
 
     // -- Display ---------------------------------------------------------------
-    Serial.println("setup: starting display");
+    emit_boot_line("starting display");
     display_ready = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
     if (display_ready) {
         display.clearDisplay();
@@ -215,12 +257,12 @@ void setup() {
         display.setTextColor(SSD1306_WHITE);
         boot_splash_until = millis() + BOOT_SPLASH_MS;
         update_boot_splash();
-        Serial.println("setup: display ready");
+        emit_boot_line("display ready");
     } else {
-        Serial.println("setup: display not found (continuing without it)");
+        emit_boot_line("display not found (continuing without it)");
     }
 
-    Serial.println("setup: complete");
+    emit_boot_line("complete");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -245,36 +287,38 @@ void loop() {
         SpectralBleachDiagnostics diagnostics = {};
         const bool have_diagnostics = current_mode == 2 && nr2 &&
             specbleach_adaptive_get_diagnostics(nr2, &diagnostics);
-        Serial.printf("m=%d src=%c red=%.1f sm=%.1f wh=%.1f ag=%.2f tk=%d pp=%d clip=%d blk_l=%lu blk_r=%lu in_l=%u in_r=%u lvl_l=%.0f lvl_r=%.0f out_l=%u out_r=%u bad=%lu",
-                      current_mode,
-                      selected_input == 0 ? 'L' : 'R',
-                      params.reduction_amount,
-                      params.smoothing_factor,
-                      params.whitening_factor,
-                      params.noise_rescale,
-                      params.tone_kill_enabled ? 1 : 0,
-                      params.post_filter_enabled ? 1 : 0,
-                      (int32_t)(clip_latch_until - millis()) > 0 ? 1 : 0,
-                      input_blocks_l,
-                      input_blocks_r,
-                      input_peak_l,
-                      input_peak_r,
-                      sqrtf(input_power_l),
-                      sqrtf(input_power_r),
-                      output_peak_l,
-                      output_peak_r,
-                      output_nonfinite);
-        if (have_diagnostics) {
-            Serial.printf(" snr=%.1f/%.1f/%.1f bands=%lu/%lu gain=%.3f mix=%.3f",
-                          diagnostics.minimum_snr,
-                          diagnostics.average_snr,
-                          diagnostics.maximum_snr,
-                          diagnostics.aggression_bands,
-                          diagnostics.bypassed_bands,
-                          diagnostics.average_gain,
-                          diagnostics.average_mixed_gain);
-        }
-        Serial.println();
+        ContractStatus st;
+        st.mode = current_mode;
+        st.src = selected_input == 0 ? 'L' : 'R';
+        st.red = (int)lroundf(params.reduction_amount);
+        st.sm = (int)lroundf(params.smoothing_factor);
+        st.wh = (int)lroundf(params.whitening_factor);
+        st.ag = (int)lroundf(params.noise_rescale);
+        st.tk = params.tone_kill_enabled ? 1 : 0;
+        st.pp = params.post_filter_enabled ? 1 : 0;
+        st.clip = (int32_t)(clip_latch_until - millis()) > 0 ? 1 : 0;
+        st.blk_l = input_blocks_l;
+        st.blk_r = input_blocks_r;
+        st.in_l = input_peak_l;
+        st.in_r = input_peak_r;
+        st.lvl_l = (int)lroundf(sqrtf(input_power_l));
+        st.lvl_r = (int)lroundf(sqrtf(input_power_r));
+        st.out_l = output_peak_l;
+        st.out_r = output_peak_r;
+        st.bad = output_nonfinite;
+        st.have_tail = have_diagnostics ? 1 : 0;
+        st.snr_min = diagnostics.minimum_snr;
+        st.snr_avg = diagnostics.average_snr;
+        st.snr_max = diagnostics.maximum_snr;
+        st.bands_aggression = diagnostics.aggression_bands;
+        st.bands_bypassed = diagnostics.bypassed_bands;
+        st.gain = diagnostics.average_gain;
+        st.mix = diagnostics.average_mixed_gain;
+        st.up = (uint64_t)(millis() / 1000);
+        st.ver = SOFTWARE_VERSION;
+        char line[512];
+        contract_status_line(line, sizeof(line), &st);
+        Serial.println(line);
         input_blocks_l = 0;
         input_blocks_r = 0;
         input_peak_l = 0;

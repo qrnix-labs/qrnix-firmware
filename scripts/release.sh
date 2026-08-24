@@ -183,7 +183,7 @@ if ((!DRY_RUN)); then
     echo "== release summary =="
     echo "version:  $TAG"
     echo "tag at:   $(git rev-parse --short HEAD) ($(git log -1 --format=%s))"
-    echo "actions:  create tag, build, push main, push tag, create GitHub release, verify digest"
+    echo "actions:  create tag, build, release-branch PR, push tag, create GitHub release, verify digest"
     read -r -p "Proceed? [y/N] " ans < /dev/tty || ans="n"
     if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
       echo "aborted" >&2
@@ -225,7 +225,59 @@ fi
 # owner/repo from the remote URL. Strip .git FIRST: the greedy capture would
 # otherwise swallow it and the API path would 404.
 REPO="$(git remote get-url origin | sed -E 's#\.git$##' | sed -E 's#.*[:/]([^/]+/[^/]+)$#\1#')"
-git push origin main
+
+# main is protected (ruleset: PRs required, no direct pushes) — ship the
+# release-prep commit through a release branch + PR, then push the tag once
+# the PR is merged. The tag must land on a commit that is on main's history,
+# so the PR must be merged with a merge commit, not squash.
+RELEASE_BRANCH="release/${TAG#v}"
+if git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
+  git branch -f "$RELEASE_BRANCH"
+else
+  git branch "$RELEASE_BRANCH"
+fi
+# Throwaway branch: force-push is fine (main's force-push protection is
+# untouched); a stale branch from an aborted run is replaced.
+git push -fu origin "$RELEASE_BRANCH"
+PR_URL="$(gh pr create --base main --head "$RELEASE_BRANCH" \
+  --title "Prepare release $TAG" \
+  --body "Release prep for **$TAG**.
+
+**Merge with a merge commit (not squash)** so the release tag stays on main's history. The release script continues automatically once this PR is merged.")"
+echo "== release PR =="
+echo "$PR_URL"
+echo "waiting for the release PR to be merged (up to 15 minutes)..."
+
+RELEASE_BRANCH_HEAD="$(git rev-parse "$RELEASE_BRANCH")"
+PR_STATE=""
+for _ in $(seq 1 60); do
+  PR_STATE="$(gh pr view "$PR_URL" --json state,mergedAt -q '.state + " " + (.mergedAt // "")' 2>/dev/null)"
+  if [[ "$PR_STATE" == MERGED* ]]; then
+    break
+  fi
+  sleep 15
+done
+if [[ "$PR_STATE" != MERGED* ]]; then
+  echo "error: release PR not merged within 15 minutes" >&2
+  echo "  finish manually:" >&2
+  echo "    gh pr merge '$PR_URL' --merge" >&2
+  echo "    git push origin '$TAG'" >&2
+  echo "    gh release create '$TAG' '$HEX_NAME' --title 'QRNix $TAG' --notes-file '$NOTES'" >&2
+  echo "    (then re-verify the digest per the script output above)" >&2
+  exit 1
+fi
+
+# Bring local main up to date with the merge; verify the release commit is
+# actually on main's history before tagging it as a release.
+git fetch origin main
+if ! git merge-base --is-ancestor "$RELEASE_BRANCH_HEAD" "origin/main"; then
+  echo "error: the release commit is not on origin/main (was the PR squash-merged?)" >&2
+  echo "  the tag would dangle; fix main and re-run" >&2
+  exit 1
+fi
+if [[ "$(git branch --show-current)" == main ]]; then
+  git merge --ff-only origin/main
+fi
 git push origin "$TAG"
 gh release create "$TAG" "$HEX_NAME" \
   --title "QRNix $TAG" \

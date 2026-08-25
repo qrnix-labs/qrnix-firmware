@@ -134,6 +134,7 @@ float tune_score_db = 0.0f;              // last completed tune score
 bool saved_tk = false;                   // TK/PP flags restored after the run
 bool saved_pp = false;
 uint8_t tune_last_tenth = 0;             // progress serial throttle (10% steps)
+uint8_t tune_progress_pct = 0;           // search progress for the display
 TunerParams tune_last_candidate;         // adapter: last candidate loaded
 bool tune_candidate_loaded = false;      // adapter: per-candidate setup done
 SpectralBleachParameters last_params;    // loop apply-change detection
@@ -150,6 +151,14 @@ constexpr uint32_t TUNE_RING_CAPACITY = 44100;        // 1 s @ 44.1 kHz (~88 KB)
 constexpr uint64_t QUIET_POWER_THRESHOLD = 107374ull; // per-sample power of RMS 327.68 (~-40 dBFS)
 constexpr unsigned long TUNE_NOTICE_MS = 3000;        // full-screen guard notice
 constexpr unsigned long TUNE_CANCEL_NOTICE_MS = 1500; // brief press-cancel notice
+
+// Audition gate (issue 11): the configurations header owns the default;
+// this fallback keeps the sketch self-contained when built without the
+// vendored header in the include path. Production overrides with
+// -DTUNE_AUDITION_ENABLED=0.
+#ifndef TUNE_AUDITION_ENABLED
+#define TUNE_AUDITION_ENABLED 1
+#endif
 
 // ── Display ──────────────────────────────────────────────────────────────────
 
@@ -206,7 +215,7 @@ static bool tune_process_block(const float *input, uint32_t samples,
                                void *userdata);
 static void tune_progress_cb(float fraction, const TunerParams *current,
                              float score_db, void *userdata);
-static void apply_tune_result(const TunerResult *result);
+void tune_search_advance();
 void sync_tk_bypass_processor();
 void update_boot_splash();
 void update_display();
@@ -550,27 +559,14 @@ void loop() {
         }
     }
 
-    // ── Step the tune search (one 128-sample block per loop iteration) ──────
-    // The resumable tuner core keeps the display, button, and serial live
-    // for the whole budgeted run; completion applies the tuned parameters
-    // with the pots ignored (issue 12 hands them back per catch window).
-    if (tune_active) {
-        if (tuner_core_step(&tune_core)) {
-            const TunerResult result = tuner_core_finish(&tune_core);
-            tune_active = false;
-            if (result.ok) {
-                apply_tune_result(&result);
-            } else {
-                // Search never produced a result: restore prior state.
-                params.tone_kill_enabled = saved_tk;
-                params.post_filter_enabled = saved_pp;
-                sync_tk_bypass_processor();
-                apply_params();
-                last_params = params;
-                Serial.println("tune: aborted");
-            }
-        }
-    }
+    // ── Step the tune search ─────────────────────────────────────────────────
+    // Silent mode: advance one 128-sample block per loop iteration (DSP
+    // speed), keeping the display, button, and serial live for the whole
+    // budgeted run. Audition mode (issue 11) paces the search from the
+    // audio dispatch below instead; this driver stays idle there.
+#if !TUNE_AUDITION_ENABLED
+    tune_search_advance();
+#endif
 
     // ── Apply params (only when changed) ─────────────────────────────────────
     // Skipped while a search runs: the adapter owns the NR1 parameters
@@ -673,9 +669,17 @@ void loop() {
 
         // Dispatch
         if (tune_active) {
-            // The search owns the NR1 instance, so live audio is replaced
-            // by silence for the duration (issue 11 adds the audition sink).
+#if TUNE_AUDITION_ENABLED
+            // Audition mode (issue 11): the search is paced by the input
+            // clock — one step per audio block — and the processed test
+            // signal replaces live passthrough for the duration.
+            tune_search_advance();
+            memcpy(float_out, tune_core.output_buf, sizeof(float_out));
+#else
+            // Silent mode: the search runs at DSP speed from the loop
+            // driver; live audio is silent for the duration.
             memset(float_out, 0, sizeof(float_out));
+#endif
         } else switch (current_mode) {
         case 2:  // NR2 — adaptive
             if (!nr2 || !specbleach_adaptive_process(nr2, BLOCK_SAMPLES, float_in, float_out)) {
@@ -902,13 +906,14 @@ static bool tune_process_block(const float *input, uint32_t samples,
     }
     return specbleach_process(nr1, samples, input, output);
 }
-
-// Periodic serial progress (one line per 10%).
+// Periodic serial progress (one line per 10%); the display reads the
+// latest percentage for the "Tuning NN%" state (issue 10).
 static void tune_progress_cb(float fraction, const TunerParams *current,
                              float score_db, void *userdata) {
     (void)current;
     (void)score_db;
     (void)userdata;
+    tune_progress_pct = (uint8_t)(fraction * 100.0f);
     const uint8_t tenth = (uint8_t)(fraction * 10.0f);
     if (tenth != tune_last_tenth) {
         tune_last_tenth = tenth;
@@ -917,7 +922,6 @@ static void tune_progress_cb(float fraction, const TunerParams *current,
         Serial.println("%");
     }
 }
-
 // Apply the tuned parameters, restore TK/PP, and latch the tuned state
 // (the pots are ignored from here on; per-param catch windows land in
 // issue 12, exit semantics in issue 13).
@@ -960,6 +964,7 @@ void start_tune() {
     tune_active = true;
     tuned_latch = false;
     tune_last_tenth = 0;
+    tune_progress_pct = 0;
     saved_tk = params.tone_kill_enabled;
     saved_pp = params.post_filter_enabled;
     params.tone_kill_enabled = false;   // forced off during the search
@@ -978,6 +983,29 @@ void abort_tune() {
     apply_params();                     // restore the live parameters
     last_params = params;
     Serial.println("tune: aborted");
+}
+
+// Advance the search by one 128-sample block and handle completion.
+// Silent mode calls this from the loop driver (DSP speed); audition mode
+// (issue 11) calls it once per audio block so the sweep is paced by the
+// input clock.
+void tune_search_advance() {
+    if (!tune_active) return;
+    if (tuner_core_step(&tune_core)) {
+        const TunerResult result = tuner_core_finish(&tune_core);
+        tune_active = false;
+        if (result.ok) {
+            apply_tune_result(&result);
+        } else {
+            // Search never produced a result: restore prior state.
+            params.tone_kill_enabled = saved_tk;
+            params.post_filter_enabled = saved_pp;
+            sync_tk_bypass_processor();
+            apply_params();
+            last_params = params;
+            Serial.println("tune: aborted");
+        }
+    }
 }
 
 void show_tune_notice(int mode) {
@@ -1115,32 +1143,60 @@ void update_display() {
     display.println(mode_str);
     display.setTextColor(SSD1306_WHITE);
 
-    // Line 2 — reduction bar
+    // Line 2 — reduction bar (the bar stays normal; the value inverts
+    // while the tune is latched)
     display.print("Red: ");
     int bar = (int)(params.reduction_amount / REDUCTION_MAX_DB * 80);
     for (int i = 0; i < bar / 8; i++) display.print("\xDB");  // full block
     display.print(" ");
-    display.print((int)roundf(params.reduction_amount));
-    display.println("dB");
+    char red_buf[8];
+    snprintf(red_buf, sizeof(red_buf), "%ddB", (int)roundf(params.reduction_amount));
+    if (tuned_latch) {
+        display.fillRect(display.getCursorX(), 16, (int16_t)(strlen(red_buf) * 6), 8, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+    }
+    display.print(red_buf);
+    display.setTextColor(SSD1306_WHITE);
+    display.println();
 
-    // Line 3 — smoothing + whitening
+    // Line 3 — smoothing + whitening (values invert while latched)
     display.print("Sm:");
-    display.print((int)params.smoothing_factor);
-    display.print("%  Wh:");
-    display.print((int)params.whitening_factor);
-    display.println("%");
+    char sm_buf[8];
+    snprintf(sm_buf, sizeof(sm_buf), "%d%%", (int)params.smoothing_factor);
+    if (tuned_latch) {
+        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(sm_buf) * 6), 8, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+    }
+    display.print(sm_buf);
+    display.setTextColor(SSD1306_WHITE);
+    display.print("  Wh:");
+    char wh_buf[8];
+    snprintf(wh_buf, sizeof(wh_buf), "%d%%", (int)params.whitening_factor);
+    if (tuned_latch) {
+        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(wh_buf) * 6), 8, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+    }
+    display.print(wh_buf);
+    display.setTextColor(SSD1306_WHITE);
+    display.println();
 
     // Line 4 — aggression + status + feature indicators
-    // Status (Prof/Learn/None/Auto/Bypass) sits at a fixed position after the
-    // value; indicators follow in TK, PP order. Reversed video = feature
-    // active in this mode; normal-video PP in bypass = armed but dormant
-    // (the post-filter has no effect there).
+    // Status (Learning../Tuning NN%/Tuned/Prof/None/Auto/Bypass) sits at a
+    // fixed position after the value; indicators follow in TK, PP order.
+    // Reversed video = feature active in this mode; normal-video PP in
+    // bypass = armed but dormant (the post-filter has no effect there).
     display.setCursor(0, 48);
     display.print("Ag:");
+    if (tuned_latch) {
+        display.fillRect(display.getCursorX(), 48, 24, 8, SSD1306_WHITE);  // "1.20" is always 4 chars
+        display.setTextColor(SSD1306_BLACK);
+    }
     display.print(params.noise_rescale, 2);
+    display.setTextColor(SSD1306_WHITE);
 
     int16_t x = 48;  // "Ag:1.93" (42 px) + separator space
     const char *status = "Bypass";
+    char tune_status_buf[16];
     bool chip = false;
     if (tune_notice != 0) {
         // Persistent inverted guard chip (CLIP/QUIET) until the next
@@ -1148,7 +1204,17 @@ void update_display() {
         status = tune_notice == 1 ? "CLIP" : "QUIET";
         chip = true;
     } else if (nr1_noise_learning) {
-        status = "Learn";
+        status = "Learning...";
+    } else if (tune_active) {
+        // Search progress: "Tuning NN%".
+        snprintf(tune_status_buf, sizeof(tune_status_buf), "Tuning %u%%",
+                 (unsigned)tune_progress_pct);
+        status = tune_status_buf;
+    } else if (tuned_latch) {
+        // Completed tune: inverted "Tuned" chip; the locked values above
+        // are inverted too (per-param un-inversion lands in issue 12).
+        status = "Tuned";
+        chip = true;
     } else if (current_mode == 1 && specbleach_noise_profile_available(nr1)) {
         status = "Prof";
     } else if (current_mode == 1) {

@@ -38,6 +38,9 @@ void catch_lock_init(CatchLock *lock);
 void catch_lock_set_tuned(CatchLock *lock, const CatchTuned *tuned);
 /* Returns true when ALL four parameters are unlocked (mask == 0) -> caller
    returns the box to manual. Pot order: [red, sm, wh, ag]. */
+bool catch_lock_update(CatchLock *lock, const uint16_t pot_adc[CATCH_PARAM_COUNT]);
+bool catch_lock_is_locked(const CatchLock *lock, CatchParam p);
+
 #ifdef __cplusplus
 }
 #endif

@@ -39,6 +39,7 @@
 
 #include "serial_contract.h"
 #include "autotune/tuner_core.h"
+#include "autotune/catch_lock.h"
 
 extern "C" {
 #include "specbleach_denoiser.h"    // NR1 API + SpectralBleachParameters struct
@@ -138,6 +139,7 @@ uint8_t tune_progress_pct = 0;           // search progress for the display
 TunerParams tune_last_candidate;         // adapter: last candidate loaded
 bool tune_candidate_loaded = false;      // adapter: per-candidate setup done
 SpectralBleachParameters last_params;    // loop apply-change detection
+CatchLock tune_lock;                     // per-param catch windows (issue 12)
 
 // ── Feature state (tone-kill / post-filter) ─────────────────────────────────
 
@@ -372,16 +374,53 @@ void loop() {
 #endif
 
     // ── Read knobs ───────────────────────────────────────────────────────────
-    // A completed tune governs the four params (pots ignored); a running
-    // search must not let pot reads push mid-candidate parameters into the
-    // denoiser. Per-param catch-window handoff lands in issue 12.
-    if (!tuned_latch && !tune_active) {
-        params.reduction_amount = mapfloat(analogRead(PIN_REDUCTION),  0, 1023,
-                                           0, REDUCTION_MAX_DB);
-        params.smoothing_factor = mapfloat(analogRead(PIN_SMOOTHING),  0, 1023, 0, 100);
-        params.whitening_factor = mapfloat(analogRead(PIN_WHITENING),  0, 1023, 0, 100);
-        const float aggression_position =
-            mapfloat(analogRead(PIN_AGGRESSION), 0, 1023, 0, 1);
+    // A completed tune governs the four params (pots ignored) until each
+    // pot parks inside its catch window; a running search must not let pot
+    // reads push mid-candidate parameters into the denoiser.
+    const uint16_t pot_red = analogRead(PIN_REDUCTION);
+    const uint16_t pot_sm = analogRead(PIN_SMOOTHING);
+    const uint16_t pot_wh = analogRead(PIN_WHITENING);
+    const uint16_t pot_ag = analogRead(PIN_AGGRESSION);
+    if (tuned_latch && !tune_active) {
+        // Catch-window handoff (issue 12): each pot that parks inside its
+        // window takes over its parameter; all four unlocked returns the
+        // box to manual pots.
+        const uint16_t pots[CATCH_PARAM_COUNT] = {pot_red, pot_sm, pot_wh, pot_ag};
+        const uint16_t mask_before = tune_lock.lock_mask;
+        const bool all_unlocked = catch_lock_update(&tune_lock, pots);
+        for (int p = 0; p < CATCH_PARAM_COUNT; p++) {
+            const uint16_t bit = (uint16_t)(1u << p);
+            if ((mask_before & bit) != 0 && (tune_lock.lock_mask & bit) == 0) {
+                const char *name = p == CATCH_PARAM_REDUCTION ? "red"
+                                 : p == CATCH_PARAM_SMOOTHING ? "sm"
+                                 : p == CATCH_PARAM_WHITENING ? "wh"
+                                 :                             "ag";
+                Serial.print("tune: unlock ");
+                Serial.println(name);
+            }
+        }
+        if (!catch_lock_is_locked(&tune_lock, CATCH_PARAM_REDUCTION)) {
+            params.reduction_amount = mapfloat(pot_red, 0, 1023, 0, REDUCTION_MAX_DB);
+        }
+        if (!catch_lock_is_locked(&tune_lock, CATCH_PARAM_SMOOTHING)) {
+            params.smoothing_factor = mapfloat(pot_sm, 0, 1023, 0, 100);
+        }
+        if (!catch_lock_is_locked(&tune_lock, CATCH_PARAM_WHITENING)) {
+            params.whitening_factor = mapfloat(pot_wh, 0, 1023, 0, 100);
+        }
+        if (!catch_lock_is_locked(&tune_lock, CATCH_PARAM_AGGRESSION)) {
+            const float aggression_position = mapfloat(pot_ag, 0, 1023, 0, 1);
+            params.noise_rescale = 2.0f * aggression_position * aggression_position;
+        }
+        if (all_unlocked) {
+            tuned_latch = false;  // the box returns to manual pots
+            Serial.println("tune: unlock all - manual");
+        }
+    } else if (!tuned_latch && !tune_active) {
+        params.reduction_amount = mapfloat(pot_red, 0, 1023, 0, REDUCTION_MAX_DB);
+        params.smoothing_factor = mapfloat(pot_sm, 0, 1023, 0, 100);
+        params.whitening_factor = mapfloat(pot_wh, 0, 1023, 0, 100);
+        const float aggression_position = mapfloat(pot_ag, 0, 1023, 0, 1);
         params.noise_rescale = 2.0f * aggression_position * aggression_position;
     }
 
@@ -829,11 +868,16 @@ void handle_button_hold() {
     if (current_mode == 1) {
         start_noise_capture();
     } else if (current_mode == 0) {
-        // Bypass: deliberate clear-all escape hatch for both feature flags.
+        // Bypass: deliberate clear-all escape hatch for both feature flags
+        // and any completed tune preset (issue 13): the pots govern again.
         params.tone_kill_enabled = false;
         params.post_filter_enabled = false;
         sync_tk_bypass_processor();
         Serial.println("tk: cleared");
+        if (tuned_latch) {
+            tuned_latch = false;
+            Serial.println("tune: cleared");
+        }
     }
     // NR2: hold is a no-op.
 }
@@ -937,6 +981,16 @@ static void apply_tune_result(const TunerResult *result) {
     last_params = params;
     tuned_latch = true;
     tune_score_db = result->score_db;
+    // Arm the catch windows on the freshly tuned values (issue 12); the
+    // mask resets here after every completed tune.
+    catch_lock_init(&tune_lock);
+    CatchTuned tuned;
+    tuned.reduction_db = result->params.reduction_db;
+    tuned.smoothing_pct = result->params.smoothing_pct;
+    tuned.whitening_pct = result->params.whitening_pct;
+    tuned.noise_rescale = result->params.noise_rescale;
+    catch_lock_set_tuned(&tune_lock, &tuned);
+    Serial.println("tune: lock 0xF");
     Serial.print("tune: complete red=");
     Serial.print(params.reduction_amount, 1);
     Serial.print(" sm=");
@@ -1151,7 +1205,8 @@ void update_display() {
     display.print(" ");
     char red_buf[8];
     snprintf(red_buf, sizeof(red_buf), "%ddB", (int)roundf(params.reduction_amount));
-    if (tuned_latch) {
+    if (tuned_latch && current_mode != 0 &&
+        catch_lock_is_locked(&tune_lock, CATCH_PARAM_REDUCTION)) {
         display.fillRect(display.getCursorX(), 16, (int16_t)(strlen(red_buf) * 6), 8, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
@@ -1163,7 +1218,8 @@ void update_display() {
     display.print("Sm:");
     char sm_buf[8];
     snprintf(sm_buf, sizeof(sm_buf), "%d%%", (int)params.smoothing_factor);
-    if (tuned_latch) {
+    if (tuned_latch && current_mode != 0 &&
+        catch_lock_is_locked(&tune_lock, CATCH_PARAM_SMOOTHING)) {
         display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(sm_buf) * 6), 8, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
@@ -1172,7 +1228,8 @@ void update_display() {
     display.print("  Wh:");
     char wh_buf[8];
     snprintf(wh_buf, sizeof(wh_buf), "%d%%", (int)params.whitening_factor);
-    if (tuned_latch) {
+    if (tuned_latch && current_mode != 0 &&
+        catch_lock_is_locked(&tune_lock, CATCH_PARAM_WHITENING)) {
         display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(wh_buf) * 6), 8, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
@@ -1187,7 +1244,8 @@ void update_display() {
     // bypass = armed but dormant (the post-filter has no effect there).
     display.setCursor(0, 48);
     display.print("Ag:");
-    if (tuned_latch) {
+    if (tuned_latch && current_mode != 0 &&
+        catch_lock_is_locked(&tune_lock, CATCH_PARAM_AGGRESSION)) {
         display.fillRect(display.getCursorX(), 48, 24, 8, SSD1306_WHITE);  // "1.20" is always 4 chars
         display.setTextColor(SSD1306_BLACK);
     }
@@ -1210,9 +1268,10 @@ void update_display() {
         snprintf(tune_status_buf, sizeof(tune_status_buf), "Tuning %u%%",
                  (unsigned)tune_progress_pct);
         status = tune_status_buf;
-    } else if (tuned_latch) {
+    } else if (tuned_latch && current_mode != 0) {
         // Completed tune: inverted "Tuned" chip; the locked values above
-        // are inverted too (per-param un-inversion lands in issue 12).
+        // are inverted per-param. Dormant in Bypass (issue 13): the preset
+        // survives the mode switch but shows normal video there.
         status = "Tuned";
         chip = true;
     } else if (current_mode == 1 && specbleach_noise_profile_available(nr1)) {

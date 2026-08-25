@@ -1,12 +1,32 @@
 ## [unreleased]
 
+### 🚀 Features
+
+- Emit ADR-0003 JSON wire contract envelopes (cv=1)
+
 ### 🐛 Bug Fixes
 
 - Make release --dry-run a true rehearsal (no commit)
+- Revert version string to last shipped v0.3.12
+
+### 💼 Other
+
+- Merge pull request #2 from qrnix-labs/feat/json-wire-contract
+
+feat: emit ADR-0003 JSON wire contract envelopes (cv=1)
+- Merge pull request #3 from qrnix-labs/build/release-pr-flow
+
+build: ship releases through a PR (main is branch-protected)
+
+### 🧪 Testing
+
+- Native unit tests for the wire-contract emitter
 
 ### 🛠️ Build System
 
 - Add commit-msg hook and document convention
+- Add PlatformIO build and native test workflow
+- Ship releases through a PR (main is branch-protected)
 ## [0.3.12] - 2026-08-20
 
 ### 🛠️ Build System

@@ -186,8 +186,7 @@ void test_truncation_is_safe(void) {
     TEST_ASSERT_EQUAL('\0', small[sizeof(small) - 1]);
 }
 
-int main(void) {
-    UNITY_BEGIN();
+void run_contract_tests(void) {
     RUN_TEST(test_status_full_envelope);
     RUN_TEST(test_status_no_tail);
     RUN_TEST(test_status_src_right_channel);
@@ -199,5 +198,4 @@ int main(void) {
     RUN_TEST(test_string_escaping_control_bytes);
     RUN_TEST(test_empty_strings);
     RUN_TEST(test_truncation_is_safe);
-    return UNITY_END();
 }

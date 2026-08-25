@@ -1,4 +1,4 @@
-// Auto-tune tuner core (issue 6) — see tuner_core.h.
+// Auto-tune tuner core (issue 6 + 9) — see tuner_core.h.
 //
 // Signal: harmonic stack {400, 800, 1600, 2400} Hz with weights
 // {0.5, 0.8, 1.0, 0.6} inside a syllabic envelope (4 + 7 Hz, depth 0.7),
@@ -21,6 +21,11 @@
 // fraction is candidates_run / 93 capped at 1.0. The hard time budget is
 // checked after every candidate; a full plan never starts when exhausted.
 //
+// Execution is resumable (issue 9): begin()/step()/finish() drive the
+// search one 128-sample block per step so the firmware loop keeps polling
+// the button, rendering the display, and emitting serial. run() is the
+// blocking convenience wrapper used by the host tests.
+//
 // Pure C (math.h/time.h only): no DSP, no Teensy, no malloc, no globals.
 
 #include "tuner_core.h"
@@ -40,6 +45,18 @@
 static const float TONE_FREQS[TUNER_TONE_COUNT] = {400.0f, 800.0f, 1600.0f, 2400.0f};
 static const float TONE_WEIGHTS[TUNER_TONE_COUNT] = {0.5f, 0.8f, 1.0f, 0.6f};
 
+// ── Search phases (stored in TunerCore.phase) ─────────────────────────────────
+
+enum {
+    SEARCH_COARSE = 0,
+    SEARCH_REFINE,
+    SEARCH_SMOOTH,
+    SEARCH_WHITEN,
+    SEARCH_SMOOTH2,
+    SEARCH_WHITEN2,
+    SEARCH_DONE,
+};
+
 // ── Synthesis ─────────────────────────────────────────────────────────────────
 
 static float speech_sample(float t) {
@@ -58,9 +75,9 @@ static float speech_sample(float t) {
 
 // ── Goertzel scoring ──────────────────────────────────────────────────────────
 
-// One-shot score over a whole buffer (the test harness exercises this
-// directly; run() uses the same recurrence incrementally). Fills `tones`
-// with per-bin power in sum-of-squares units. Returns dB, clamped.
+#if defined(__GNUC__)
+__attribute__((unused))  // host-test seam; not referenced by the firmware
+#endif
 static float goertzel_score(const float *x, uint32_t n, float tones[TUNER_TONE_COUNT]) {
     float prev[TUNER_TONE_COUNT] = {0};
     float prev2[TUNER_TONE_COUNT] = {0};
@@ -101,7 +118,14 @@ static float goertzel_score(const float *x, uint32_t n, float tones[TUNER_TONE_C
 // ── Clock ─────────────────────────────────────────────────────────────────────
 
 static uint32_t default_now_ms(void) {
+#ifdef __arm__
+    // The firmware always supplies a millis()-based clock; a missing clock
+    // trips the budget immediately (safe fail). clock() would pull in the
+    // newlib _times stub, which the Teensy toolchain does not provide.
+    return 0;
+#else
     return (uint32_t)((uint64_t)clock() * 1000u / CLOCKS_PER_SEC);
+#endif
 }
 
 // ── Mix construction ──────────────────────────────────────────────────────────
@@ -139,7 +163,7 @@ static void compute_mix(TunerCore *core, const int16_t *ring, uint32_t ring_n) {
     core->mix_scale = peak > 0.0f ? TUNER_PEAK_AMP / peak : 0.0f;
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// ── Public API: init / synthesize ─────────────────────────────────────────────
 
 void tuner_core_init(TunerCore *core, const TunerConfig *config) {
     core->discard_samples = config->discard_samples;
@@ -153,6 +177,7 @@ void tuner_core_init(TunerCore *core, const TunerConfig *config) {
     }
     core->noise_gain = 0.0f;
     core->mix_scale = 0.0f;
+    core->phase = SEARCH_DONE;
 }
 
 uint32_t tuner_core_synthesize(const TunerConfig *config,
@@ -182,102 +207,10 @@ uint32_t tuner_core_synthesize(const TunerConfig *config,
     return count;
 }
 
-// Evaluate one candidate: stream the mix through the process callback in
-// TUNER_BLOCK_SAMPLES blocks, discard the convergence window, score the
-// eval window. Returns the clamped score.
-static float evaluate_candidate(TunerCore *core, const TunerParams *params,
-                                const int16_t *ring, uint32_t ring_n,
-                                TunerProcessFn process, void *process_ud) {
-    const uint32_t win = core->discard_samples + core->eval_samples;
-    const uint32_t nblocks = (win + TUNER_BLOCK_SAMPLES - 1) / TUNER_BLOCK_SAMPLES;
-    for (int k = 0; k < TUNER_TONE_COUNT; k++) {
-        core->bin_prev[k] = 0.0f;
-        core->bin_prev2[k] = 0.0f;
-    }
-    core->total_power = 0.0;
-    core->abs_pos = 0;
+// ── Search state machine ──────────────────────────────────────────────────────
 
-    for (uint32_t b = 0; b < nblocks; b++) {
-        for (uint32_t i = 0; i < TUNER_BLOCK_SAMPLES; i++) {
-            const uint32_t n = b * TUNER_BLOCK_SAMPLES + i;
-            if (n >= win) {
-                core->input_buf[i] = 0.0f;
-            } else {
-                const float t = (float)n / (float)TUNER_SAMPLE_RATE;
-                const float s = speech_sample(t);
-                const float v = (float)ring[n % ring_n] / 32768.0f;
-                core->input_buf[i] = (s + core->noise_gain * v) * core->mix_scale;
-            }
-        }
-        if (!process(core->input_buf, TUNER_BLOCK_SAMPLES, params,
-                     core->output_buf, process_ud)) {
-            return TUNER_SCORE_MIN_DB;  // failed candidate
-        }
-        for (uint32_t i = 0; i < TUNER_BLOCK_SAMPLES; i++) {
-            core->abs_pos++;
-            if (core->abs_pos <= core->discard_samples) {
-                continue;
-            }
-            if (core->abs_pos > core->discard_samples + core->eval_samples) {
-                continue;
-            }
-            const float sample = core->output_buf[i];
-            core->total_power += (double)sample * (double)sample;
-            for (int k = 0; k < TUNER_TONE_COUNT; k++) {
-                const float next = sample + core->tone_coef[k] * core->bin_prev[k] -
-                                   core->bin_prev2[k];
-                core->bin_prev2[k] = core->bin_prev[k];
-                core->bin_prev[k] = next;
-            }
-        }
-    }
-
-    double tone = 0.0;
-    for (int k = 0; k < TUNER_TONE_COUNT; k++) {
-        const double power = ((double)core->bin_prev[k] * core->bin_prev[k] +
-                              (double)core->bin_prev2[k] * core->bin_prev2[k] -
-                              (double)core->tone_coef[k] * core->bin_prev[k] *
-                                  core->bin_prev2[k]) *
-                             2.0 / (double)core->eval_samples;
-        tone += power;
-    }
-    if (tone <= 0.0) {
-        return TUNER_SCORE_MIN_DB;
-    }
-    const double residual = fmax((double)TUNER_RESIDUAL_FLOOR,
-                                 core->total_power - tone);
-    float score = 10.0f * log10f((float)(tone / residual));
-    if (score > TUNER_SCORE_MAX_DB) score = TUNER_SCORE_MAX_DB;
-    if (score < TUNER_SCORE_MIN_DB) score = TUNER_SCORE_MIN_DB;
-    return score;
-}
-
-// Evaluate a candidate, track the best, report progress, return true when
-// the time budget is exhausted (search must stop).
-static bool evaluate_and_track(TunerCore *core, const TunerParams *params,
-                               const int16_t *ring, uint32_t ring_n,
-                               TunerProcessFn process, void *process_ud,
-                               TunerProgressFn progress, void *progress_ud) {
-    const float score = evaluate_candidate(core, params, ring, ring_n,
-                                           process, process_ud);
-    core->candidates_run++;
-    if (!core->have_best || score > core->best_score) {
-        core->have_best = true;
-        core->best = *params;
-        core->best_score = score;
-    }
-    if (progress != NULL) {
-        float fraction = (float)core->candidates_run / (float)core->planned_total;
-        if (fraction > 1.0f) fraction = 1.0f;
-        progress(fraction, &core->best, core->best_score, progress_ud);
-    }
-    const uint32_t elapsed = core->now_ms() - core->started_ms;
-    return elapsed >= core->time_budget_ms;
-}
-
-// True when (red, res) is already in the scored list (coarse grid or a
-// previously taken refine candidate). Exact equality is safe: all values
-// come from the same grid arithmetic.
+// True when (red, res) is already in a scored list. Exact equality is
+// safe: all values come from the same grid arithmetic.
 static bool already_scored(const float (*scored)[2], uint32_t count,
                            float red, float res) {
     for (uint32_t i = 0; i < count; i++) {
@@ -300,115 +233,308 @@ static TunerParams clamp_to_bounds(TunerParams p) {
     return p;
 }
 
+// Reset the per-candidate scoring state (called before the first block).
+static void reset_candidate_state(TunerCore *core) {
+    for (int k = 0; k < TUNER_TONE_COUNT; k++) {
+        core->bin_prev[k] = 0.0f;
+        core->bin_prev2[k] = 0.0f;
+    }
+    core->total_power = 0.0;
+    core->abs_pos = 0;
+    core->candidate_failed = false;
+}
+
+// Fill input_buf with the normalized mix for block `b` of the window.
+static void build_block(TunerCore *core, uint32_t b) {
+    const uint32_t win = core->discard_samples + core->eval_samples;
+    for (uint32_t i = 0; i < TUNER_BLOCK_SAMPLES; i++) {
+        const uint32_t n = b * TUNER_BLOCK_SAMPLES + i;
+        if (n >= win) {
+            core->input_buf[i] = 0.0f;
+        } else {
+            const float t = (float)n / (float)TUNER_SAMPLE_RATE;
+            const float s = speech_sample(t);
+            const float v = (float)core->ring[n % core->ring_n] / 32768.0f;
+            core->input_buf[i] = (s + core->noise_gain * v) * core->mix_scale;
+        }
+    }
+}
+
+// Accumulate one processed output sample into the Goertzel state when it
+// falls inside the eval window.
+static void accumulate_sample(TunerCore *core, float sample) {
+    core->abs_pos++;
+    if (core->abs_pos <= core->discard_samples) {
+        return;
+    }
+    if (core->abs_pos > core->discard_samples + core->eval_samples) {
+        return;
+    }
+    core->total_power += (double)sample * (double)sample;
+    for (int k = 0; k < TUNER_TONE_COUNT; k++) {
+        const float next = sample + core->tone_coef[k] * core->bin_prev[k] -
+                           core->bin_prev2[k];
+        core->bin_prev2[k] = core->bin_prev[k];
+        core->bin_prev[k] = next;
+    }
+}
+
+// Score the finished candidate, track the best, report progress, and
+// check the hard time budget.
+static void finish_candidate(TunerCore *core) {
+    float score = TUNER_SCORE_MIN_DB;
+    if (!core->candidate_failed) {
+        double tone = 0.0;
+        for (int k = 0; k < TUNER_TONE_COUNT; k++) {
+            const double power = ((double)core->bin_prev[k] * core->bin_prev[k] +
+                                  (double)core->bin_prev2[k] * core->bin_prev2[k] -
+                                  (double)core->tone_coef[k] * core->bin_prev[k] *
+                                      core->bin_prev2[k]) *
+                                 2.0 / (double)core->eval_samples;
+            tone += power;
+        }
+        if (tone > 0.0) {
+            const double residual = fmax((double)TUNER_RESIDUAL_FLOOR,
+                                         core->total_power - tone);
+            score = 10.0f * log10f((float)(tone / residual));
+            if (score > TUNER_SCORE_MAX_DB) score = TUNER_SCORE_MAX_DB;
+            if (score < TUNER_SCORE_MIN_DB) score = TUNER_SCORE_MIN_DB;
+        }
+    }
+    core->candidates_run++;
+    if (!core->have_best || score > core->best_score) {
+        core->have_best = true;
+        core->best = core->current;
+        core->best_score = score;
+    }
+    if (core->progress != NULL) {
+        float fraction = (float)core->candidates_run / (float)core->planned_total;
+        if (fraction > 1.0f) fraction = 1.0f;
+        core->progress(fraction, &core->best, core->best_score, core->progress_ud);
+    }
+    const uint32_t elapsed = core->now_ms() - core->started_ms;
+    if (elapsed >= core->time_budget_ms) {
+        core->budget_exhausted = true;
+    }
+}
+
+// Advance to the next candidate of the fixed plan. Returns false when the
+// plan is exhausted (phase becomes SEARCH_DONE); the caller then reports
+// completion. On success sets core->current and resets candidate state.
+static bool next_candidate(TunerCore *core) {
+    for (;;) {
+        switch (core->phase) {
+        case SEARCH_COARSE: {
+            if (core->grid_ni > 8) {
+                core->grid_ni = 0;
+                core->grid_ri++;
+            }
+            if (core->grid_ri > 6) {
+                core->phase = SEARCH_REFINE;
+                core->refine_idx = 0;
+                continue;
+            }
+            TunerParams p = core->start;
+            p.reduction_db = (float)(core->grid_ri * 5);
+            p.noise_rescale = (float)core->grid_ni * 0.25f;
+            core->coarse_grid[core->coarse_count][0] = p.reduction_db;
+            core->coarse_grid[core->coarse_count][1] = p.noise_rescale;
+            core->coarse_count++;
+            core->grid_ni++;
+            core->current = p;
+            core->block_pos = 0;
+            reset_candidate_state(core);
+            return true;
+        }
+        case SEARCH_REFINE: {
+            if (core->refine_idx >= 4) {
+                core->phase = SEARCH_SMOOTH;
+                core->polish_idx = 0;
+                continue;
+            }
+            const float red = core->best.reduction_db;
+            const float res = core->best.noise_rescale;
+            float cr = red;
+            float cn = res;
+            switch (core->refine_idx) {
+            case 0: cr = red - 5.0f; break;
+            case 1: cr = red + 5.0f; break;
+            case 2: cn = res - 0.25f; break;
+            default: cn = res + 0.25f; break;
+            }
+            core->refine_idx++;
+            if (cr < 0.0f) cr = 0.0f;
+            if (cr > 30.0f) cr = 30.0f;
+            if (cn < 0.0f) cn = 0.0f;
+            if (cn > 2.0f) cn = 2.0f;
+            if (already_scored(core->coarse_grid, core->coarse_count, cr, cn) ||
+                already_scored(core->refine_grid, core->refine_count, cr, cn)) {
+                continue;
+            }
+            core->refine_grid[core->refine_count][0] = cr;
+            core->refine_grid[core->refine_count][1] = cn;
+            core->refine_count++;
+            TunerParams p = core->best;
+            p.reduction_db = cr;
+            p.noise_rescale = cn;
+            core->current = p;
+            core->block_pos = 0;
+            reset_candidate_state(core);
+            return true;
+        }
+        case SEARCH_SMOOTH: {
+            if (core->polish_idx > 10) {
+                core->phase = SEARCH_WHITEN;
+                core->polish_idx = 0;
+                continue;
+            }
+            TunerParams p = core->best;
+            p.smoothing_pct = (float)(core->polish_idx * 10);
+            core->polish_idx++;
+            core->current = p;
+            core->block_pos = 0;
+            reset_candidate_state(core);
+            return true;
+        }
+        case SEARCH_WHITEN: {
+            if (core->polish_idx > 10) {
+                core->phase = SEARCH_SMOOTH2;
+                core->polish_idx = 0;
+                continue;
+            }
+            TunerParams p = core->best;
+            p.whitening_pct = (float)(core->polish_idx * 10);
+            core->polish_idx++;
+            core->current = p;
+            core->block_pos = 0;
+            reset_candidate_state(core);
+            return true;
+        }
+        case SEARCH_SMOOTH2: {
+            if (core->polish_idx >= 2) {
+                core->phase = SEARCH_WHITEN2;
+                core->polish_idx = 0;
+                continue;
+            }
+            TunerParams p = core->best;
+            p.smoothing_pct += core->polish_idx == 0 ? -5.0f : 5.0f;
+            core->polish_idx++;
+            core->current = clamp_to_bounds(p);
+            core->block_pos = 0;
+            reset_candidate_state(core);
+            return true;
+        }
+        case SEARCH_WHITEN2: {
+            if (core->polish_idx >= 2) {
+                core->phase = SEARCH_DONE;
+                return false;
+            }
+            TunerParams p = core->best;
+            p.whitening_pct += core->polish_idx == 0 ? -5.0f : 5.0f;
+            core->polish_idx++;
+            core->current = clamp_to_bounds(p);
+            core->block_pos = 0;
+            reset_candidate_state(core);
+            return true;
+        }
+        default:
+            core->phase = SEARCH_DONE;
+            return false;
+        }
+    }
+}
+
+// ── Public API: begin / step / finish / run ───────────────────────────────────
+
+bool tuner_core_begin(TunerCore *core, const int16_t *noise_ring,
+                      uint32_t noise_ring_samples, TunerProcessFn process,
+                      void *process_ud, TunerProgressFn progress,
+                      void *progress_ud) {
+    if (core == NULL || process == NULL || noise_ring == NULL ||
+        noise_ring_samples == 0 || core->eval_samples == 0 ||
+        core->discard_samples == 0 || core->time_budget_ms == 0) {
+        return false;
+    }
+    core->ring = noise_ring;
+    core->ring_n = noise_ring_samples;
+    core->process = process;
+    core->process_ud = process_ud;
+    core->progress = progress;
+    core->progress_ud = progress_ud;
+    core->started_ms = core->now_ms();
+    core->candidates_run = 0;
+    core->have_best = false;
+    core->best_score = TUNER_SCORE_MIN_DB;
+    core->budget_exhausted = false;
+    core->planned_total = 63 + 4 + 11 + 11 + 2 + 2;  // see header comment
+    core->phase = SEARCH_COARSE;
+    core->grid_ri = 0;
+    core->grid_ni = 0;
+    core->refine_idx = 0;
+    core->polish_idx = 0;
+    core->coarse_count = 0;
+    core->refine_count = 0;
+    compute_mix(core, noise_ring, noise_ring_samples);
+    return next_candidate(core);
+}
+
+// Process one 128-sample block of the current candidate; returns true when
+// the whole search is finished (success, abort via finish(), or budget).
+bool tuner_core_step(TunerCore *core) {
+    if (core->phase == SEARCH_DONE) {
+        return true;
+    }
+    const uint32_t win = core->discard_samples + core->eval_samples;
+    const uint32_t nblocks = (win + TUNER_BLOCK_SAMPLES - 1) / TUNER_BLOCK_SAMPLES;
+    if (core->block_pos < nblocks) {
+        build_block(core, core->block_pos);
+        if (!core->process(core->input_buf, TUNER_BLOCK_SAMPLES, &core->current,
+                           core->output_buf, core->process_ud)) {
+            core->candidate_failed = true;  // failed candidate: score -60 dB
+        } else {
+            for (uint32_t i = 0; i < TUNER_BLOCK_SAMPLES; i++) {
+                accumulate_sample(core, core->output_buf[i]);
+            }
+        }
+        core->block_pos++;
+        if (core->block_pos >= nblocks) {
+            finish_candidate(core);
+            if (core->budget_exhausted) {
+                core->phase = SEARCH_DONE;
+                return true;
+            }
+            return !next_candidate(core);  // true when the plan is done
+        }
+        return false;
+    }
+    core->phase = SEARCH_DONE;
+    return true;
+}
+
+TunerResult tuner_core_finish(TunerCore *core) {
+    TunerResult result = {{0}, 0.0f, 0, false, false};
+    if (core == NULL) {
+        return result;
+    }
+    result.ok = core->have_best;
+    result.budget_exhausted = core->budget_exhausted;
+    result.candidates_run = core->candidates_run;
+    result.params = core->best;
+    result.score_db = core->best_score;
+    return result;
+}
+
 TunerResult tuner_core_run(TunerCore *core, const int16_t *noise_ring,
                            uint32_t noise_ring_samples, TunerProcessFn process,
                            void *process_ud, TunerProgressFn progress,
                            void *progress_ud) {
     TunerResult result = {{0}, 0.0f, 0, false, false};
-    if (core == NULL || process == NULL || noise_ring == NULL ||
-        noise_ring_samples == 0 || core->eval_samples == 0 ||
-        core->discard_samples == 0 || core->time_budget_ms == 0) {
+    if (!tuner_core_begin(core, noise_ring, noise_ring_samples, process,
+                          process_ud, progress, progress_ud)) {
         return result;
     }
-    core->started_ms = core->now_ms();
-    core->candidates_run = 0;
-    core->have_best = false;
-    core->best_score = TUNER_SCORE_MIN_DB;
-    core->planned_total = 63 + 4 + 11 + 11 + 2 + 2;  // see header comment
-
-    compute_mix(core, noise_ring, noise_ring_samples);
-
-    // 1. Coarse 2-D grid: reduction x noise_rescale.
-    float coarse[63][2];
-    uint32_t coarse_count = 0;
-    bool stop = false;
-    for (int ri = 0; ri <= 6 && !stop; ri++) {
-        for (int ni = 0; ni <= 8 && !stop; ni++) {
-            TunerParams p = core->start;
-            p.reduction_db = (float)(ri * 5);
-            p.noise_rescale = (float)ni * 0.25f;
-            coarse[coarse_count][0] = p.reduction_db;
-            coarse[coarse_count][1] = p.noise_rescale;
-            coarse_count++;
-            stop = evaluate_and_track(core, &p, noise_ring, noise_ring_samples,
-                                      process, process_ud, progress, progress_ud);
-        }
+    while (!tuner_core_step(core)) {
+        // block-by-block; the loop body does nothing else
     }
-
-    // 2. Local refine around the best coarse cell (+-1 step, clamped, dedup).
-    if (!stop) {
-        float refine[4][2];
-        uint32_t refine_count = 0;
-        const float red = core->best.reduction_db;
-        const float res = core->best.noise_rescale;
-        const float candidates[4][2] = {
-            {red - 5.0f, res}, {red + 5.0f, res},
-            {red, res - 0.25f}, {red, res + 0.25f},
-        };
-        for (int c = 0; c < 4; c++) {
-            float cr = candidates[c][0];
-            float cn = candidates[c][1];
-            if (cr < 0.0f) cr = 0.0f;
-            if (cr > 30.0f) cr = 30.0f;
-            if (cn < 0.0f) cn = 0.0f;
-            if (cn > 2.0f) cn = 2.0f;
-            if (already_scored(coarse, coarse_count, cr, cn) ||
-                already_scored(refine, refine_count, cr, cn)) {
-                continue;
-            }
-            refine[refine_count][0] = cr;
-            refine[refine_count][1] = cn;
-            refine_count++;
-            TunerParams p = core->best;
-            p.reduction_db = cr;
-            p.noise_rescale = cn;
-            stop = evaluate_and_track(core, &p, noise_ring, noise_ring_samples,
-                                      process, process_ud, progress, progress_ud);
-            if (stop) break;
-        }
-    }
-
-    // 3. 1-D polish: smoothing, then whitening (whitening may go to 0).
-    if (!stop) {
-        for (int si = 0; si <= 10 && !stop; si++) {
-            TunerParams p = core->best;
-            p.smoothing_pct = (float)(si * 10);
-            stop = evaluate_and_track(core, &p, noise_ring, noise_ring_samples,
-                                      process, process_ud, progress, progress_ud);
-        }
-    }
-    if (!stop) {
-        for (int wi = 0; wi <= 10 && !stop; wi++) {
-            TunerParams p = core->best;
-            p.whitening_pct = (float)(wi * 10);
-            stop = evaluate_and_track(core, &p, noise_ring, noise_ring_samples,
-                                      process, process_ud, progress, progress_ud);
-        }
-    }
-    // 4. Budget-permitting second polish at 5% steps around the best.
-    if (!stop) {
-        for (int k = 0; k < 2 && !stop; k++) {
-            TunerParams p = core->best;
-            p.smoothing_pct += k == 0 ? -5.0f : 5.0f;
-            p = clamp_to_bounds(p);
-            stop = evaluate_and_track(core, &p, noise_ring, noise_ring_samples,
-                                      process, process_ud, progress, progress_ud);
-        }
-    }
-    if (!stop) {
-        for (int k = 0; k < 2 && !stop; k++) {
-            TunerParams p = core->best;
-            p.whitening_pct += k == 0 ? -5.0f : 5.0f;
-            p = clamp_to_bounds(p);
-            stop = evaluate_and_track(core, &p, noise_ring, noise_ring_samples,
-                                      process, process_ud, progress, progress_ud);
-        }
-    }
-
-    result.ok = true;
-    result.budget_exhausted = stop;
-    result.candidates_run = core->candidates_run;
-    result.params = core->best;
-    result.score_db = core->best_score;
-    return result;
+    return tuner_core_finish(core);
 }

@@ -1,7 +1,12 @@
 #ifndef AUTOTUNE_CATCH_LOCK_H
 #define AUTOTUNE_CATCH_LOCK_H
+
 #include <stdbool.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define CATCH_PARAM_COUNT    4
 #define CATCH_WINDOW_ADC     50   /* single tunable constant: window width in ADC counts */
@@ -33,6 +38,8 @@ void catch_lock_init(CatchLock *lock);
 void catch_lock_set_tuned(CatchLock *lock, const CatchTuned *tuned);
 /* Returns true when ALL four parameters are unlocked (mask == 0) -> caller
    returns the box to manual. Pot order: [red, sm, wh, ag]. */
-bool catch_lock_update(CatchLock *lock, const uint16_t pot_adc[CATCH_PARAM_COUNT]);
-bool catch_lock_is_locked(const CatchLock *lock, CatchParam p);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

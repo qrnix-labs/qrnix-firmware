@@ -38,6 +38,7 @@
 #include <string.h>
 
 #include "serial_contract.h"
+#include "autotune/tuner_core.h"
 
 extern "C" {
 #include "specbleach_denoiser.h"    // NR1 API + SpectralBleachParameters struct
@@ -124,6 +125,19 @@ bool capture_clipped = false;            // clip seen during the capture window
 uint64_t capture_power_sum = 0;          // quiet-guard accumulator (selected channel)
 uint32_t capture_blocks = 0;             // blocks metered during the capture window
 
+// ── Auto-tune run (issue 9) ──────────────────────────────────────────────────
+
+TunerCore tune_core;                     // resumable search state (issue 6)
+TunerConfig tune_config;                 // search configuration (built at boot)
+bool tuned_latch = false;                // completed tune governs the four params
+float tune_score_db = 0.0f;              // last completed tune score
+bool saved_tk = false;                   // TK/PP flags restored after the run
+bool saved_pp = false;
+uint8_t tune_last_tenth = 0;             // progress serial throttle (10% steps)
+TunerParams tune_last_candidate;         // adapter: last candidate loaded
+bool tune_candidate_loaded = false;      // adapter: per-candidate setup done
+SpectralBleachParameters last_params;    // loop apply-change detection
+
 // ── Feature state (tone-kill / post-filter) ─────────────────────────────────
 
 SpectralProcessorHandle tk_bypass = nullptr;  // lazy notch STFT, bypass+TK only
@@ -186,6 +200,13 @@ void abort_tune();
 void show_tune_notice(int mode);
 void show_tune_cancel_notice();
 void clear_tune_notice();
+static uint32_t tune_now_ms(void);
+static bool tune_process_block(const float *input, uint32_t samples,
+                               const TunerParams *tp, float *output,
+                               void *userdata);
+static void tune_progress_cb(float fraction, const TunerParams *current,
+                             float score_db, void *userdata);
+static void apply_tune_result(const TunerResult *result);
 void sync_tk_bypass_processor();
 void update_boot_splash();
 void update_display();
@@ -282,6 +303,18 @@ void setup() {
         emit_boot_line("tune ring unavailable");
     }
 
+    // -- Auto-tune search core (issue 9) ---------------------------------------
+    memset(&tune_config, 0, sizeof(tune_config));
+    tune_config.discard_samples = 4410;    // ~100 ms convergence discard
+    tune_config.eval_samples = 13230;      // ~0.3 s scoring window
+    tune_config.time_budget_ms = 45000;    // hard search budget
+    tune_config.start.reduction_db = 10.0f;
+    tune_config.start.smoothing_pct = 10.0f;
+    tune_config.start.whitening_pct = 10.0f;
+    tune_config.start.noise_rescale = 0.20f;
+    tune_config.now_ms = tune_now_ms;
+    tuner_core_init(&tune_core, &tune_config);
+
     // -- Display ---------------------------------------------------------------
     emit_boot_line("starting display");
     display_ready = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
@@ -304,15 +337,44 @@ void setup() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void loop() {
-    // ── Read knobs ───────────────────────────────────────────────────────────
+#ifdef TUNE_TEST_TRIGGER
+    // Test-build-only serial trigger (issue 9): simulates the button
+    // gestures so the full capture + tune loop is automatable over serial.
+    // Compiled out of production builds (define via PLATFORMIO_BUILD_FLAGS).
+    while (Serial.available() > 0) {
+        char cmd[24];
+        const int n = Serial.readBytesUntil('\n', cmd, sizeof(cmd) - 1);
+        if (n <= 0) continue;
+        cmd[n] = '\0';
+        if (strcmp(cmd, "tune:test") == 0) {
+            if (current_mode == 1) {
+                handle_button_hold();  // same path as the physical hold
+            } else {
+                Serial.println("tune: ERROR - trigger needs NR1 mode");
+            }
+        } else if (strcmp(cmd, "tune:cancel") == 0) {
+            if (tune_active) {
+                abort_tune();
+            } else if (nr1_noise_learning) {
+                abort_noise_capture();
+            }
+        }
+    }
+#endif
 
-    params.reduction_amount = mapfloat(analogRead(PIN_REDUCTION),  0, 1023,
-                                       0, REDUCTION_MAX_DB);
-    params.smoothing_factor = mapfloat(analogRead(PIN_SMOOTHING),  0, 1023, 0, 100);
-    params.whitening_factor = mapfloat(analogRead(PIN_WHITENING),  0, 1023, 0, 100);
-    const float aggression_position =
-        mapfloat(analogRead(PIN_AGGRESSION), 0, 1023, 0, 1);
-    params.noise_rescale = 2.0f * aggression_position * aggression_position;
+    // ── Read knobs ───────────────────────────────────────────────────────────
+    // A completed tune governs the four params (pots ignored); a running
+    // search must not let pot reads push mid-candidate parameters into the
+    // denoiser. Per-param catch-window handoff lands in issue 12.
+    if (!tuned_latch && !tune_active) {
+        params.reduction_amount = mapfloat(analogRead(PIN_REDUCTION),  0, 1023,
+                                           0, REDUCTION_MAX_DB);
+        params.smoothing_factor = mapfloat(analogRead(PIN_SMOOTHING),  0, 1023, 0, 100);
+        params.whitening_factor = mapfloat(analogRead(PIN_WHITENING),  0, 1023, 0, 100);
+        const float aggression_position =
+            mapfloat(analogRead(PIN_AGGRESSION), 0, 1023, 0, 1);
+        params.noise_rescale = 2.0f * aggression_position * aggression_position;
+    }
 
     // -- USB serial status -----------------------------------------------------
     static unsigned long last_log = 0;
@@ -484,14 +546,38 @@ void loop() {
             show_tune_notice(2);  // QUIET chip
             Serial.println("tune: abort quiet");
         } else {
-            start_tune();  // skeleton: the real search lands in issue 9
+            start_tune();  // capture leads into the real search (issue 9)
+        }
+    }
+
+    // ── Step the tune search (one 128-sample block per loop iteration) ──────
+    // The resumable tuner core keeps the display, button, and serial live
+    // for the whole budgeted run; completion applies the tuned parameters
+    // with the pots ignored (issue 12 hands them back per catch window).
+    if (tune_active) {
+        if (tuner_core_step(&tune_core)) {
+            const TunerResult result = tuner_core_finish(&tune_core);
+            tune_active = false;
+            if (result.ok) {
+                apply_tune_result(&result);
+            } else {
+                // Search never produced a result: restore prior state.
+                params.tone_kill_enabled = saved_tk;
+                params.post_filter_enabled = saved_pp;
+                sync_tk_bypass_processor();
+                apply_params();
+                last_params = params;
+                Serial.println("tune: aborted");
+            }
         }
     }
 
     // ── Apply params (only when changed) ─────────────────────────────────────
+    // Skipped while a search runs: the adapter owns the NR1 parameters
+    // mid-candidate; the completion/abort paths sync `last_params` and
+    // re-arm the live state.
 
-    static SpectralBleachParameters last_params;
-    if (memcmp(&params, &last_params, sizeof(params)) != 0) {
+    if (!tune_active && memcmp(&params, &last_params, sizeof(params)) != 0) {
         apply_params();
         last_params = params;
     }
@@ -586,7 +672,11 @@ void loop() {
         record_queue_r.freeBuffer();
 
         // Dispatch
-        switch (current_mode) {
+        if (tune_active) {
+            // The search owns the NR1 instance, so live audio is replaced
+            // by silence for the duration (issue 11 adds the audition sink).
+            memset(float_out, 0, sizeof(float_out));
+        } else switch (current_mode) {
         case 2:  // NR2 — adaptive
             if (!nr2 || !specbleach_adaptive_process(nr2, BLOCK_SAMPLES, float_in, float_out)) {
                 memcpy(float_out, float_in, BLOCK_SAMPLES * sizeof(float));
@@ -775,23 +865,118 @@ void abort_noise_capture() {
     Serial.println("capture: aborted");
 }
 
-// ── Auto-tune skeleton (issue 8) ─────────────────────────────────────────────
+// ── Auto-tune run (issue 9) ──────────────────────────────────────────────────
+
+static uint32_t tune_now_ms(void) {
+    return (uint32_t)millis();
+}
+
+// DSP adapter: per candidate, restore the captured noise profile and load
+// the candidate parameters into the NR1 instance, then process one block.
+// TK and PP are forced off so they cannot fight the reference tones.
+static bool tune_process_block(const float *input, uint32_t samples,
+                               const TunerParams *tp, float *output,
+                               void *userdata) {
+    (void)userdata;
+    if (!nr1 || samples == 0) {
+        return false;
+    }
+    if (!tune_candidate_loaded ||
+        memcmp(&tune_last_candidate, tp, sizeof(TunerParams)) != 0) {
+        tune_candidate_loaded = true;
+        tune_last_candidate = *tp;
+        specbleach_reset_noise_profile(nr1);
+        if (nr1_cached_profile) {
+            specbleach_load_noise_profile(nr1, nr1_cached_profile,
+                                          nr1_cached_profile_size,
+                                          nr1_cached_profile_blocks);
+        }
+        SpectralBleachParameters candidate = params;
+        candidate.reduction_amount = tp->reduction_db;
+        candidate.smoothing_factor = tp->smoothing_pct;
+        candidate.whitening_factor = tp->whitening_pct;
+        candidate.noise_rescale = tp->noise_rescale;
+        candidate.tone_kill_enabled = false;   // forced off during the search
+        candidate.post_filter_enabled = false;
+        specbleach_load_parameters(nr1, candidate);
+    }
+    return specbleach_process(nr1, samples, input, output);
+}
+
+// Periodic serial progress (one line per 10%).
+static void tune_progress_cb(float fraction, const TunerParams *current,
+                             float score_db, void *userdata) {
+    (void)current;
+    (void)score_db;
+    (void)userdata;
+    const uint8_t tenth = (uint8_t)(fraction * 10.0f);
+    if (tenth != tune_last_tenth) {
+        tune_last_tenth = tenth;
+        Serial.print("tune: progress ");
+        Serial.print((int)(fraction * 100.0f));
+        Serial.println("%");
+    }
+}
+
+// Apply the tuned parameters, restore TK/PP, and latch the tuned state
+// (the pots are ignored from here on; per-param catch windows land in
+// issue 12, exit semantics in issue 13).
+static void apply_tune_result(const TunerResult *result) {
+    params.reduction_amount = result->params.reduction_db;
+    params.smoothing_factor = result->params.smoothing_pct;
+    params.whitening_factor = result->params.whitening_pct;
+    params.noise_rescale = result->params.noise_rescale;
+    params.tone_kill_enabled = saved_tk;
+    params.post_filter_enabled = saved_pp;
+    sync_tk_bypass_processor();
+    apply_params();
+    last_params = params;
+    tuned_latch = true;
+    tune_score_db = result->score_db;
+    Serial.print("tune: complete red=");
+    Serial.print(params.reduction_amount, 1);
+    Serial.print(" sm=");
+    Serial.print(params.smoothing_factor, 0);
+    Serial.print(" wh=");
+    Serial.print(params.whitening_factor, 0);
+    Serial.print(" ag=");
+    Serial.print(params.noise_rescale, 2);
+    Serial.print(" score=");
+    Serial.println(tune_score_db, 2);
+}
 
 void start_tune() {
-    // Skeleton: the real parameter search lands in issue 9 (DSP adapter +
-    // headless end-to-end tune). The tune latches active so the cancel path
-    // is exercisable; a press or mode switch aborts it with prior state
-    // intact (nothing has been applied yet).
-    if (!tune_ring || tune_active) return;
+    // Capture led to a real search: the resumable tuner core steps one
+    // 128-sample block per loop iteration (issue 9).
+    if (!tune_ring || tune_active || !nr1 || !nr1_cached_profile) {
+        return;
+    }
+    tune_candidate_loaded = false;
+    if (!tuner_core_begin(&tune_core, tune_ring, TUNE_RING_CAPACITY,
+                          tune_process_block, NULL, tune_progress_cb, NULL)) {
+        Serial.println("tune: ERROR - search failed to start");
+        return;
+    }
     tune_active = true;
+    tuned_latch = false;
+    tune_last_tenth = 0;
+    saved_tk = params.tone_kill_enabled;
+    saved_pp = params.post_filter_enabled;
+    params.tone_kill_enabled = false;   // forced off during the search
+    params.post_filter_enabled = false;
+    sync_tk_bypass_processor();
     Serial.println("tune: start");
 }
 
 void abort_tune() {
     if (!tune_active) return;
     tune_active = false;
-    // Nothing has been applied by the skeleton, so prior state is intact.
-    // Issue 9 restores the DSP parameters here.
+    tuner_core_finish(&tune_core);      // discard the search state
+    params.tone_kill_enabled = saved_tk;
+    params.post_filter_enabled = saved_pp;
+    sync_tk_bypass_processor();
+    apply_params();                     // restore the live parameters
+    last_params = params;
     Serial.println("tune: aborted");
 }
 

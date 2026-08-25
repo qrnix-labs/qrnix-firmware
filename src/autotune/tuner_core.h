@@ -10,11 +10,17 @@
 //
 // No DSP or Teensy dependencies; no malloc; no global state.
 #ifndef AUTOTUNE_TUNER_CORE_H
+#define AUTOTUNE_TUNER_CORE_H
+
 #include <stdbool.h>
 #include <stdint.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
+#endif
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 #define TUNER_TONE_COUNT     4
@@ -81,9 +87,40 @@ typedef struct TunerCore {
     float best_score;
     TunerParams best;
     bool have_best;
+    /* Resumable search state (issue 9): one 128-sample block per step. */
+    const int16_t *ring;                // current run's noise ring
+    uint32_t ring_n;
+    TunerProcessFn process;
+    void *process_ud;
+    TunerProgressFn progress;
+    void *progress_ud;
+    int phase;                          // internal search phase
+    int grid_ri, grid_ni;               // coarse-grid indices
+    int refine_idx, polish_idx;         // refine/polish indices
+    int coarse_count, refine_count;     // scored-grid dedup lists
+    float coarse_grid[63][2];
+    float refine_grid[4][2];
+    uint32_t block_pos;                 // block index within current candidate
+    bool candidate_failed;              // current candidate process failed
+    bool budget_exhausted;              // search stopped early by the budget
+    TunerParams current;                // candidate being evaluated
 } TunerCore;
 
 void tuner_core_init(TunerCore *core, const TunerConfig *config);
+
+// Resumable search (issue 9): the firmware steps one 128-sample block per
+// loop iteration so the display, button, and serial stay live. begin()
+// validates, computes the mix, and arms the first candidate; step()
+// processes one block and returns true when the search is finished (plan
+// complete, budget exhausted, or aborted via finish()); finish() returns
+// the result. run() is the blocking wrapper (begin + steps + finish) used
+// by the host tests.
+bool tuner_core_begin(TunerCore *core, const int16_t *noise_ring,
+                      uint32_t noise_ring_samples, TunerProcessFn process,
+                      void *process_ud, TunerProgressFn progress,
+                      void *progress_ud);
+bool tuner_core_step(TunerCore *core);
+TunerResult tuner_core_finish(TunerCore *core);
 
 TunerResult tuner_core_run(TunerCore *core, const int16_t *noise_ring,
                            uint32_t noise_ring_samples, TunerProcessFn process,
@@ -93,9 +130,8 @@ TunerResult tuner_core_run(TunerCore *core, const int16_t *noise_ring,
 // Synthesize the mixed + normalized test signal used by run() into `out`
 // (public so tests can verify spec conformance). Returns the number of
 // samples written (min(cap, discard+eval)); 0 on invalid input.
-uint32_t tuner_core_synthesize(const TunerConfig *config,
-                               const int16_t *noise_ring,
-                               uint32_t noise_ring_samples,
-                               float *out, uint32_t cap);
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -181,6 +181,36 @@ void test_synthesis_matches_reference_peak_and_snr(void) {
 
 // ── run(): determinism, budget, bounds, whitening, progress, guards ──────────
 
+void test_step_api_matches_blocking_run(void) {
+    // The resumable path (issue 9: one 128-sample block per step) must
+    // produce exactly the same result as the blocking run() wrapper.
+    TunerConfig cfg = default_config();
+    int16_t ring[TEST_RING_LEN];
+    make_noise_ring(ring, TEST_RING_LEN, 2024u);
+
+    TunerCore blocking, stepped;
+    tuner_core_init(&blocking, &cfg);
+    tuner_core_init(&stepped, &cfg);
+    TunerResult rb = tuner_core_run(&blocking, ring, TEST_RING_LEN,
+                                    identity_process, NULL, NULL, NULL);
+    TEST_ASSERT_TRUE(tuner_core_begin(&stepped, ring, TEST_RING_LEN,
+                                      identity_process, NULL, NULL, NULL));
+    uint32_t steps = 0;
+    while (!tuner_core_step(&stepped)) {
+        steps++;
+        TEST_ASSERT_TRUE(steps < 20000);  // never hangs
+    }
+    TunerResult rs = tuner_core_finish(&stepped);
+    TEST_ASSERT_TRUE(rs.ok);
+    TEST_ASSERT_TRUE(rb.ok);
+    TEST_ASSERT_EQUAL_UINT32(rb.candidates_run, rs.candidates_run);
+    TEST_ASSERT_TRUE(rb.params.reduction_db == rs.params.reduction_db);
+    TEST_ASSERT_TRUE(rb.params.smoothing_pct == rs.params.smoothing_pct);
+    TEST_ASSERT_TRUE(rb.params.whitening_pct == rs.params.whitening_pct);
+    TEST_ASSERT_TRUE(rb.params.noise_rescale == rs.params.noise_rescale);
+    TEST_ASSERT_TRUE(rb.score_db == rs.score_db);
+}
+
 void test_run_is_deterministic(void) {
     TunerConfig cfg = default_config();
     int16_t ring[TEST_RING_LEN];
@@ -348,6 +378,7 @@ void run_tuner_core_tests(void) {
     RUN_TEST(test_goertzel_white_noise_scores_negative);
     RUN_TEST(test_goertzel_tone_plus_noise_10db);
     RUN_TEST(test_synthesis_matches_reference_peak_and_snr);
+    RUN_TEST(test_step_api_matches_blocking_run);
     RUN_TEST(test_run_is_deterministic);
     RUN_TEST(test_run_respects_hard_budget);
     RUN_TEST(test_run_respects_param_bounds);

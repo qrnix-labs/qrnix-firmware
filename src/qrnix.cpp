@@ -113,11 +113,29 @@ float *nr1_cached_profile       = nullptr;
 uint32_t nr1_cached_profile_size = 0;
 uint32_t nr1_cached_profile_blocks = 0;
 
+// ── Auto-tune state (issue 8) ────────────────────────────────────────────────
+
+int16_t *tune_ring = nullptr;            // raw int16 capture ring, allocated once
+uint32_t tune_ring_pos = 0;              // wrap write position during capture
+bool tune_active = false;                // tune run in progress (stub until issue 9)
+int tune_notice = 0;                     // persistent status chip: 0 none, 1 CLIP, 2 QUIET
+unsigned long tune_notice_until = 0;     // full-screen notice deadline (millis)
+bool capture_clipped = false;            // clip seen during the capture window
+uint64_t capture_power_sum = 0;          // quiet-guard accumulator (selected channel)
+uint32_t capture_blocks = 0;             // blocks metered during the capture window
+
 // ── Feature state (tone-kill / post-filter) ─────────────────────────────────
 
 SpectralProcessorHandle tk_bypass = nullptr;  // lazy notch STFT, bypass+TK only
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 30;
 constexpr unsigned long LONG_PRESS_MS = 500;
+
+// ── Auto-tune (issue 8): capture ring, guards, tune skeleton ────────────────
+
+constexpr uint32_t TUNE_RING_CAPACITY = 44100;        // 1 s @ 44.1 kHz (~88 KB)
+constexpr uint64_t QUIET_POWER_THRESHOLD = 107374ull; // per-sample power of RMS 327.68 (~-40 dBFS)
+constexpr unsigned long TUNE_NOTICE_MS = 3000;        // full-screen guard notice
+constexpr unsigned long TUNE_CANCEL_NOTICE_MS = 1500; // brief press-cancel notice
 
 // ── Display ──────────────────────────────────────────────────────────────────
 
@@ -163,6 +181,11 @@ void handle_button_hold();
 void advance_feature_circle();
 void start_noise_capture();
 void abort_noise_capture();
+void start_tune();
+void abort_tune();
+void show_tune_notice(int mode);
+void show_tune_cancel_notice();
+void clear_tune_notice();
 void sync_tk_bypass_processor();
 void update_boot_splash();
 void update_display();
@@ -246,6 +269,17 @@ void setup() {
     current_mode = read_mode_switch();
     if (!activate_mode(current_mode)) {
         current_mode = 0;
+    }
+
+    // -- Auto-tune capture ring (1 s int16, ~88 KB) ----------------------------
+    // Allocated once at boot: a mid-run failure would otherwise strand a
+    // capture without a tune path. Tune simply stays unavailable if it fails.
+    tune_ring = (int16_t *)malloc(TUNE_RING_CAPACITY * sizeof(int16_t));
+    if (tune_ring) {
+        emit_boot_line("tune ring ready");
+    } else {
+        Serial.println("tune: ERROR - ring allocation failed");
+        emit_boot_line("tune ring unavailable");
     }
 
     // -- Display ---------------------------------------------------------------
@@ -340,6 +374,12 @@ void loop() {
 
     if (pending_mode != current_mode && millis() - mode_changed_at >= 50) {
         int new_mode = pending_mode;
+        // A mode switch aborts a running tune (per-session preset rules
+        // arrive with the tune latch in issue 13) and clears the guard chip.
+        if (tune_active) {
+            abort_tune();
+        }
+        clear_tune_notice();
         if (!activate_mode(new_mode)) {
             new_mode = 0;
         }
@@ -375,6 +415,16 @@ void loop() {
             if (nr1_noise_learning) {
                 abort_noise_capture();
                 long_dispatched = true;
+            } else if (tune_active) {
+                // A press during a tune cancels it with prior state restored.
+                abort_tune();
+                long_dispatched = true;
+            }
+            if (long_dispatched) {
+                // Any press action clears the persistent guard chip and
+                // shows the brief cancel notice.
+                clear_tune_notice();
+                show_tune_cancel_notice();
             }
         } else {
             // Release: a tap advances the circle. Release never aborts an
@@ -411,6 +461,31 @@ void loop() {
             }
         }
         Serial.println("capture: complete");
+        if (tune_ring) {
+            // Report the raw ring stats so the capture side is automatable.
+            Serial.print("tune: ring ");
+            Serial.print(capture_blocks * BLOCK_SAMPLES);
+            Serial.println(" samples");
+        }
+
+        // Auto-tune guards (issue 8): clip or quiet during the capture
+        // window aborts the tune path; the profile is kept either way.
+        const bool clipped = capture_clipped;
+        const bool quiet = capture_blocks > 0 &&
+            capture_power_sum <
+                (uint64_t)capture_blocks * QUIET_POWER_THRESHOLD * BLOCK_SAMPLES;
+        capture_clipped = false;
+        capture_power_sum = 0;
+        capture_blocks = 0;
+        if (clipped) {
+            show_tune_notice(1);  // CLIP chip
+            Serial.println("tune: abort clip");
+        } else if (quiet) {
+            show_tune_notice(2);  // QUIET chip
+            Serial.println("tune: abort quiet");
+        } else {
+            start_tune();  // skeleton: the real search lands in issue 9
+        }
     }
 
     // ── Apply params (only when changed) ─────────────────────────────────────
@@ -453,6 +528,9 @@ void loop() {
         // the CLIP flash (the shared input trim affects both channels alike).
         if (block_peak_l >= CLIP_THRESHOLD || block_peak_r >= CLIP_THRESHOLD) {
             clip_latch_until = millis() + CLIP_LATCH_MS;
+            if (nr1_noise_learning) {
+                capture_clipped = true;  // tune guard: clip aborts the tune path
+            }
         }
         input_blocks_l++;
         input_blocks_r++;
@@ -483,6 +561,21 @@ void loop() {
         const int16_t *selected_samples = selected_input == 0
                                         ? in_samples_l
                                         : in_samples_r;
+        if (nr1_noise_learning) {
+            // Issue 8: record the raw capture into the tune ring (wrap at
+            // capacity) and meter the selected channel for the quiet guard.
+            const uint64_t selected_energy = selected_input == 0
+                                           ? block_energy_l
+                                           : block_energy_r;
+            capture_power_sum += selected_energy;
+            capture_blocks++;
+            if (tune_ring) {
+                for (int i = 0; i < BLOCK_SAMPLES; i++) {
+                    tune_ring[tune_ring_pos] = selected_samples[i];
+                    tune_ring_pos = (tune_ring_pos + 1) % TUNE_RING_CAPACITY;
+                }
+            }
+        }
         for (int i = 0; i < BLOCK_SAMPLES; i++) {
             float amplified = (selected_samples[i] / 32768.0f) * INPUT_GAIN;
             if (amplified > 1.0f) amplified = 1.0f;
@@ -626,6 +719,7 @@ void sync_tk_bypass_processor() {
 
 void handle_button_tap() {
     if (nr1_noise_learning) return;  // guarded during capture
+    clear_tune_notice();  // any button action clears the guard chip
     if (current_mode == 0) {
         // Bypass: 2-state circle — TK only. PP is unreachable here by design.
         params.tone_kill_enabled = !params.tone_kill_enabled;
@@ -637,6 +731,7 @@ void handle_button_tap() {
 
 void handle_button_hold() {
     if (nr1_noise_learning) return;
+    clear_tune_notice();  // any button action clears the guard chip
     if (current_mode == 1) {
         start_noise_capture();
     } else if (current_mode == 0) {
@@ -651,6 +746,10 @@ void handle_button_hold() {
 
 void start_noise_capture() {
     if (current_mode != 1 || !nr1 || nr1_noise_learning) return;
+    if (tune_active) {
+        abort_tune();  // re-capture replaces a pending tune
+    }
+    clear_tune_notice();
     specbleach_reset_noise_profile(nr1);  // fresh internal profile; cache intact
     nr1_noise_learning = true;
     nr1_capture_start = millis();
@@ -674,6 +773,42 @@ void abort_noise_capture() {
         specbleach_reset_noise_profile(nr1);
     }
     Serial.println("capture: aborted");
+}
+
+// ── Auto-tune skeleton (issue 8) ─────────────────────────────────────────────
+
+void start_tune() {
+    // Skeleton: the real parameter search lands in issue 9 (DSP adapter +
+    // headless end-to-end tune). The tune latches active so the cancel path
+    // is exercisable; a press or mode switch aborts it with prior state
+    // intact (nothing has been applied yet).
+    if (!tune_ring || tune_active) return;
+    tune_active = true;
+    Serial.println("tune: start");
+}
+
+void abort_tune() {
+    if (!tune_active) return;
+    tune_active = false;
+    // Nothing has been applied by the skeleton, so prior state is intact.
+    // Issue 9 restores the DSP parameters here.
+    Serial.println("tune: aborted");
+}
+
+void show_tune_notice(int mode) {
+    // mode 1 = CLIP, 2 = QUIET. Full-screen notice for TUNE_NOTICE_MS; the
+    // inverted status chip persists until the next capture/button/mode action.
+    tune_notice = mode;
+    tune_notice_until = millis() + TUNE_NOTICE_MS;
+}
+
+void show_tune_cancel_notice() {
+    // Brief notice only — the persistent chip is untouched.
+    tune_notice_until = millis() + TUNE_CANCEL_NOTICE_MS;
+}
+
+void clear_tune_notice() {
+    tune_notice = 0;
 }
 
 bool activate_mode(int mode) {
@@ -765,6 +900,21 @@ void update_display() {
     if (!display_ready) return;
 
     display.clearDisplay();
+
+    // Full-screen guard/cancel notice (3 s; 1.5 s for press-cancel). The
+    // persistent chip below survives the overlay until the next action.
+    if ((int32_t)(tune_notice_until - millis()) > 0) {
+        const char *notice = tune_notice == 1 ? "CLIP"
+                          : tune_notice == 2 ? "QUIET"
+                          :                    "TUNE CANCELLED";
+        display.fillRect(0, 0, 128, 64, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+        display.setCursor((int16_t)((128 - (int16_t)strlen(notice) * 6) / 2), 28);
+        display.print(notice);
+        display.display();
+        return;
+    }
+
     display.setCursor(0, 0);
 
     // Line 1 — mode; the whole line inverts as the CLIP indicator
@@ -806,7 +956,13 @@ void update_display() {
 
     int16_t x = 48;  // "Ag:1.93" (42 px) + separator space
     const char *status = "Bypass";
-    if (nr1_noise_learning) {
+    bool chip = false;
+    if (tune_notice != 0) {
+        // Persistent inverted guard chip (CLIP/QUIET) until the next
+        // capture/button/mode action.
+        status = tune_notice == 1 ? "CLIP" : "QUIET";
+        chip = true;
+    } else if (nr1_noise_learning) {
         status = "Learn";
     } else if (current_mode == 1 && specbleach_noise_profile_available(nr1)) {
         status = "Prof";
@@ -815,8 +971,16 @@ void update_display() {
     } else if (current_mode == 2) {
         status = "Auto";
     }
-    display.setCursor(x, 48);
-    display.print(status);
+    if (chip) {
+        display.fillRect(x, 48, (int16_t)(strlen(status) * 6), 16, SSD1306_WHITE);
+        display.setCursor(x, 48);
+        display.setTextColor(SSD1306_BLACK);
+        display.print(status);
+        display.setTextColor(SSD1306_WHITE);
+    } else {
+        display.setCursor(x, 48);
+        display.print(status);
+    }
     x += (int16_t)(strlen(status) * 6);
 
     if (params.tone_kill_enabled) {

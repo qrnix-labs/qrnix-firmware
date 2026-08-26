@@ -138,6 +138,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #define TIME_SMOOTHING_TYPE TRANSIENT_AWARE
 
 /* ------------------------------------------------------------------------ */
+/* ------------------- QRNix additions (LGPL §2(a) notice) ---------------- */
+/* ------------------------------------------------------------------------ */
+/* Added 2026-08-25 by the QRNix firmware project: auto-tune audition gate.
+   See PRD issue 5 / implementation issue 11. Defaults on for development;
+   production builds override with -DTUNE_AUDITION_ENABLED=0. */
+#ifndef TUNE_AUDITION_ENABLED
+#define TUNE_AUDITION_ENABLED 1
+#endif
+
+/* ------------------------------------------------------------------------ */
 /* ------------------- Adaptive Denoiser configurations ------------------- */
 /* ------------------------------------------------------------------------ */
 

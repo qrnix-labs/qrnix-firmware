@@ -2,6 +2,39 @@
 
 ### 🚀 Features
 
+- Add auto-tune catch-window lock module (issue 7)
+- Add auto-tune tuner core module (issue 6)
+- Capture ring, tune guards, and tune skeleton (issue 8)
+- DSP adapter and headless end-to-end tune (issue 9)
+- Tune display states (issue 10)
+- Audition gate for the tune sweep (issue 11)
+- Catch-window unlock integration and exit semantics (issues 12 + 13)
+- *(contract)* Emit additive sn key in status envelope
+- *(serial)* OCOTP serial-identity module + sketch wiring
+
+### 💼 Other
+
+- Merge pull request #4 from qrnix-labs/release/0.3.13
+
+Prepare release v0.3.13
+- Merge pull request #15 from qrnix-labs/feat/autotune
+
+feat: auto-tune — tuner core, capture guards, end-to-end tune, catch-window unlock (issues 6-13)
+- Merge pull request #21 from qrnix-labs/sn-serial
+
+Serial: report unit serial in the status envelope
+
+### 📚 Documentation
+
+- Document auto-tune flow, serial vocabulary, and gates
+
+### 🧪 Testing
+
+- Unify native test entry via shared Unity runner
+## [0.3.13] - 2026-08-25
+
+### 🚀 Features
+
 - Emit ADR-0003 JSON wire contract envelopes (cv=1)
 
 ### 🐛 Bug Fixes

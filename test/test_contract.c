@@ -41,6 +41,7 @@ static ContractStatus full_status(void) {
     s.mix = 0.5f;
     s.up = 100;
     s.ver = "0.3.12";
+    s.sn = "0123456789ABCDEF";
     return s;
 }
 
@@ -88,6 +89,25 @@ void test_status_full_envelope(void) {
     TEST_ASSERT_TRUE(strstr(line, "\"mix\":0.500,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"up\":100,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"ver\":\"0.3.12\"") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "\"ver\":\"0.3.12\",\"sn\":\"0123456789ABCDEF\"") != NULL);
+    assert_envelope(line);
+}
+
+// The sn key is exactly 16 uppercase hex digits with no prefix (AC #17).
+void test_status_sn_format(void) {
+    ContractStatus s = full_status();
+    contract_status_line(line, sizeof(line), &s);
+
+    const char *sn = strstr(line, "\"sn\":\"");
+    TEST_ASSERT_NOT_NULL(sn);
+    sn += 6;  // skip `"sn":"`
+    for (int i = 0; i < 16; i++) {
+        const char c = sn[i];
+        const int is_hex = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+        TEST_ASSERT_TRUE_MESSAGE(is_hex, "sn digit must be 0-9 or A-F");
+    }
+    TEST_ASSERT_EQUAL('\"', sn[16]);
+    TEST_ASSERT_NULL(strstr(line, "\"sn\":\"0x"));
     assert_envelope(line);
 }
 
@@ -100,9 +120,10 @@ void test_status_no_tail(void) {
     TEST_ASSERT_NULL(strstr(line, "bands_"));
     TEST_ASSERT_NULL(strstr(line, "\"gain\""));
     TEST_ASSERT_NULL(strstr(line, "\"mix\""));
-    // up/ver are always present.
+    // up/ver/sn are always present.
     TEST_ASSERT_TRUE(strstr(line, "\"up\":100,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"ver\":\"0.3.12\"") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "\"sn\":\"0123456789ABCDEF\"") != NULL);
     assert_envelope(line);
 }
 
@@ -188,6 +209,7 @@ void test_truncation_is_safe(void) {
 
 void run_contract_tests(void) {
     RUN_TEST(test_status_full_envelope);
+    RUN_TEST(test_status_sn_format);
     RUN_TEST(test_status_no_tail);
     RUN_TEST(test_status_src_right_channel);
     RUN_TEST(test_status_knobs_integer_no_decimal);

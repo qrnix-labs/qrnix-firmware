@@ -148,6 +148,8 @@ size_t contract_status_line(char *buf, size_t cap, const ContractStatus *s) {
     b_fmt(&b, "%llu", (unsigned long long)s->up);
     b_raw(&b, ",\"ver\":");
     b_str(&b, s->ver != NULL ? s->ver : "");
+    b_raw(&b, ",\"sn\":");
+    b_str(&b, s->sn != NULL ? s->sn : "");
     b_raw(&b, "}");
     return b.n;
 }

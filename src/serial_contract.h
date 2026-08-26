@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 /// All values of one status envelope. Tail fields are only emitted when
-/// `have_tail` is non-zero (NR2 mode); `up`/`ver` are always emitted.
+/// `have_tail` is non-zero (NR2 mode); `up`/`ver`/`sn` are always emitted.
 typedef struct {
     int mode;                  // 0 = OFF, 1 = NR1, 2 = NR2
     char src;                  // 'L' or 'R' (selected input channel)
@@ -48,6 +48,7 @@ typedef struct {
     float mix;                 // NR2 tail: average mixed gain
     uint64_t up;               // seconds since boot
     const char *ver;           // firmware version (SOFTWARE_VERSION)
+    const char *sn;            // unit serial: 16 uppercase hex digits, no prefix (ADR-0006)
 } ContractStatus;
 
 /// Build a status envelope into `buf` (NUL-terminated). Returns the number

@@ -8,12 +8,14 @@
 #include <unity.h>
 
 void run_contract_tests(void);
+void run_serial_identity_tests(void);
 void run_catch_lock_tests(void);
 void run_tuner_core_tests(void);
 
 int main(void) {
     UNITY_BEGIN();
     run_contract_tests();
+    run_serial_identity_tests();
     run_catch_lock_tests();
     run_tuner_core_tests();
     return UNITY_END();

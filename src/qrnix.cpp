@@ -38,8 +38,12 @@
 #include <string.h>
 
 #include "serial_contract.h"
+#include "serial_identity.h"
 #include "autotune/tuner_core.h"
 #include "autotune/catch_lock.h"
+
+// OCOTP read wrapper — defined in serial_identity_teensy.cpp (Teensy-only).
+void serial_identity_early_init(void);
 
 extern "C" {
 #include "specbleach_denoiser.h"    // NR1 API + SpectralBleachParameters struct
@@ -255,6 +259,12 @@ struct BufPrint : public Print {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void setup() {
+    // -- Unit serial identity (ADR-0006) ---------------------------------------
+    // OCOTP shadow registers, read once: the value is factory-blown and
+    // constant for the life of the chip. The very first status envelope
+    // already carries it (PRD scenario A3).
+    serial_identity_early_init();
+
     // -- USB serial diagnostics -----------------------------------------------
     Serial.begin(115200);
     const unsigned long serial_wait_start = millis();
@@ -460,6 +470,7 @@ void loop() {
         st.mix = diagnostics.average_mixed_gain;
         st.up = (uint64_t)(millis() / 1000);
         st.ver = SOFTWARE_VERSION;
+        st.sn = serial_identity_get();
         char line[512];
         contract_status_line(line, sizeof(line), &st);
         Serial.println(line);

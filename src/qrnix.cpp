@@ -405,8 +405,26 @@ void loop() {
                                  : p == CATCH_PARAM_SMOOTHING ? "sm"
                                  : p == CATCH_PARAM_WHITENING ? "wh"
                                  :                             "ag";
+                // Handed-over value (issue 24): the pot-mapped parameter at
+                // handover, matching the `tune: complete` vocabulary so the
+                // no-jump check is exact without cross-referencing cadence.
+                float handover = 0.0f;
+                int prec = 1;
+                if (p == CATCH_PARAM_REDUCTION) {
+                    handover = mapfloat(pots[p], 0, 1023, 0, REDUCTION_MAX_DB);
+                } else if (p == CATCH_PARAM_SMOOTHING || p == CATCH_PARAM_WHITENING) {
+                    handover = mapfloat(pots[p], 0, 1023, 0, 100);
+                    prec = 0;
+                } else {
+                    const float position = mapfloat(pots[p], 0, 1023, 0, 1);
+                    handover = 2.0f * position * position;
+                    prec = 2;
+                }
                 Serial.print("tune: unlock ");
-                Serial.println(name);
+                Serial.print(name);
+                Serial.print(" val=");
+                Serial.print(handover, prec);
+                Serial.println();
             }
         }
         if (!catch_lock_is_locked(&tune_lock, CATCH_PARAM_REDUCTION)) {
@@ -448,6 +466,7 @@ void loop() {
         st.sm = (int)lroundf(params.smoothing_factor);
         st.wh = (int)lroundf(params.whitening_factor);
         st.ag = (int)lroundf(params.noise_rescale);
+        st.lk = tuned_latch ? (int)tune_lock.lock_mask : 0;
         st.tk = params.tone_kill_enabled ? 1 : 0;
         st.pp = params.post_filter_enabled ? 1 : 0;
         st.clip = (int32_t)(clip_latch_until - millis()) > 0 ? 1 : 0;
@@ -1218,7 +1237,7 @@ void update_display() {
     snprintf(red_buf, sizeof(red_buf), "%ddB", (int)roundf(params.reduction_amount));
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_REDUCTION)) {
-        display.fillRect(display.getCursorX(), 16, (int16_t)(strlen(red_buf) * 6), 8, SSD1306_WHITE);
+        display.fillRect(display.getCursorX(), 16, (int16_t)(strlen(red_buf) * 6), 16, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(red_buf);
@@ -1231,7 +1250,7 @@ void update_display() {
     snprintf(sm_buf, sizeof(sm_buf), "%d%%", (int)params.smoothing_factor);
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_SMOOTHING)) {
-        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(sm_buf) * 6), 8, SSD1306_WHITE);
+        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(sm_buf) * 6), 16, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(sm_buf);
@@ -1241,7 +1260,7 @@ void update_display() {
     snprintf(wh_buf, sizeof(wh_buf), "%d%%", (int)params.whitening_factor);
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_WHITENING)) {
-        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(wh_buf) * 6), 8, SSD1306_WHITE);
+        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(wh_buf) * 6), 16, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(wh_buf);
@@ -1257,7 +1276,7 @@ void update_display() {
     display.print("Ag:");
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_AGGRESSION)) {
-        display.fillRect(display.getCursorX(), 48, 24, 8, SSD1306_WHITE);  // "1.20" is always 4 chars
+        display.fillRect(display.getCursorX(), 48, 24, 16, SSD1306_WHITE);  // "1.20" is always 4 chars
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(params.noise_rescale, 2);

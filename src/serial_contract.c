@@ -104,6 +104,8 @@ size_t contract_status_line(char *buf, size_t cap, const ContractStatus *s) {
     b_fmt(&b, "%d", s->wh);
     b_raw(&b, ",\"ag\":");
     b_fmt(&b, "%d", s->ag);
+    b_raw(&b, ",\"lk\":");
+    b_fmt(&b, "%d", s->lk);
     b_raw(&b, ",\"tk\":");
     b_fmt(&b, "%d", s->tk);
     b_raw(&b, ",\"pp\":");

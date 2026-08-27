@@ -2,6 +2,31 @@
 
 ### 🚀 Features
 
+- *(serial)* Report catch-window lock mask and handover value (issue 24)
+
+### 🐛 Bug Fixes
+
+- *(display)* Render tuned-state value inversion full-height (issue 25)
+
+### 💼 Other
+
+- Merge pull request #22 from qrnix-labs/release/0.3.14
+
+Prepare release v0.3.14
+- Merge pull request #26 from qrnix-labs/feat/autotune-lock-mask-display
+
+feat(serial): lock-mask telemetry + fix(display): full-height inversion (issues 24, 25)
+- Merge pull request #28 from qrnix-labs/feat/autotune-faster-search
+
+perf(autotune): shrink tune search to 50 candidates via real refine pass (issue 27)
+
+### ⚡ Performance
+
+- *(autotune)* Shrink tune search to 50 candidates via real refine pass (issue 27)
+## [0.3.14] - 2026-08-26
+
+### 🚀 Features
+
 - Add auto-tune catch-window lock module (issue 7)
 - Add auto-tune tuner core module (issue 6)
 - Capture ring, tune guards, and tune skeleton (issue 8)

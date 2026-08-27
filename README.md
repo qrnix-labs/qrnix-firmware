@@ -122,8 +122,7 @@ Auto-tune adds its own lines around the capture/tune flow: `capture: start`,
 `capture: complete`, `capture: aborted`, `tune: ring N samples`, `tune: start`,
 `tune: progress NN%`, `tune: complete red=… sm=… wh=… ag=… score=…`,
 `tune: aborted`, the guard aborts `tune: abort clip` / `tune: abort quiet`,
-the catch-window transitions `tune: unlock red|sm|wh|ag`, `tune: unlock all -
-manual`, and the exit line `tune: cleared`. While a tune is latched the
+the catch-window transitions `tune: unlock red|sm|wh|ag val=…`, `tune: unlock all - manual`, and the exit line `tune: cleared`. While a tune is latched the
 status line reports the tuned values, not the pots.
 
 A `CrashReport` printed once after a successful boot describes the previous

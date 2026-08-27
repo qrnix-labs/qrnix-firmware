@@ -19,6 +19,7 @@ static ContractStatus full_status(void) {
     s.sm = 55;
     s.wh = 30;
     s.ag = 1;
+    s.lk = 15;
     s.tk = 1;
     s.pp = 0;
     s.clip = 0;
@@ -69,6 +70,7 @@ void test_status_full_envelope(void) {
     TEST_ASSERT_TRUE(strstr(line, "\"wh\":30,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"ag\":1,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"tk\":1,") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "\"lk\":15,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"pp\":0,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"clip\":0,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"blk_l\":12,") != NULL);
@@ -150,6 +152,7 @@ void test_status_zero_mode_and_values(void) {
     s.sm = 0;
     s.wh = 0;
     s.ag = 0;
+    s.lk = 0;
     s.tk = 0;
     s.pp = 0;
     s.clip = 0;
@@ -158,6 +161,7 @@ void test_status_zero_mode_and_values(void) {
     contract_status_line(line, sizeof(line), &s);
     TEST_ASSERT_TRUE(strstr(line, "\"m\":0") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"red\":0,") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "\"lk\":0,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"bad\":0,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"up\":0,") != NULL);
     assert_envelope(line);

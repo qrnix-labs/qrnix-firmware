@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 /// All values of one status envelope. Tail fields are only emitted when
-/// `have_tail` is non-zero (NR2 mode); `up`/`ver`/`sn` are always emitted.
+/// `have_tail` is non-zero (NR2 mode); `lk`/`up`/`ver`/`sn` are always emitted.
 typedef struct {
     int mode;                  // 0 = OFF, 1 = NR1, 2 = NR2
     char src;                  // 'L' or 'R' (selected input channel)
@@ -26,6 +26,7 @@ typedef struct {
     int sm;                    // knob position, integer
     int wh;                    // knob position, integer
     int ag;                    // aggression (0..2), integer
+    int lk;                    // catch-window lock mask 0..15 (0 = manual, 0xF = all locked)
     int tk;                    // tone-kill enabled, 0/1
     int pp;                    // post-filter enabled, 0/1
     int clip;                  // clip latch active, 0/1

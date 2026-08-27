@@ -1237,7 +1237,7 @@ void update_display() {
     snprintf(red_buf, sizeof(red_buf), "%ddB", (int)roundf(params.reduction_amount));
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_REDUCTION)) {
-        display.fillRect(display.getCursorX(), 16, (int16_t)(strlen(red_buf) * 6), 8, SSD1306_WHITE);
+        display.fillRect(display.getCursorX(), 16, (int16_t)(strlen(red_buf) * 6), 16, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(red_buf);
@@ -1250,7 +1250,7 @@ void update_display() {
     snprintf(sm_buf, sizeof(sm_buf), "%d%%", (int)params.smoothing_factor);
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_SMOOTHING)) {
-        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(sm_buf) * 6), 8, SSD1306_WHITE);
+        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(sm_buf) * 6), 16, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(sm_buf);
@@ -1260,7 +1260,7 @@ void update_display() {
     snprintf(wh_buf, sizeof(wh_buf), "%d%%", (int)params.whitening_factor);
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_WHITENING)) {
-        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(wh_buf) * 6), 8, SSD1306_WHITE);
+        display.fillRect(display.getCursorX(), 32, (int16_t)(strlen(wh_buf) * 6), 16, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(wh_buf);
@@ -1276,7 +1276,7 @@ void update_display() {
     display.print("Ag:");
     if (tuned_latch && current_mode != 0 &&
         catch_lock_is_locked(&tune_lock, CATCH_PARAM_AGGRESSION)) {
-        display.fillRect(display.getCursorX(), 48, 24, 8, SSD1306_WHITE);  // "1.20" is always 4 chars
+        display.fillRect(display.getCursorX(), 48, 24, 16, SSD1306_WHITE);  // "1.20" is always 4 chars
         display.setTextColor(SSD1306_BLACK);
     }
     display.print(params.noise_rescale, 2);

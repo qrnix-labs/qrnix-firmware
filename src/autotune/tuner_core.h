@@ -27,6 +27,26 @@ extern "C" {
 #define TUNER_SAMPLE_RATE    44100u
 #define TUNER_BLOCK_SAMPLES  128u
 
+// Search plan (single source of truth): the coarse 2-D grid covers
+// reduction x noise_rescale; refine probes one midpoint per axis around
+// the best coarse cell; polish sweeps smoothing/whitening in 10s with a
+// +-5 second pass. TUNER_PLANNED_TOTAL drives the progress fraction and
+// TUNER_COARSE_COUNT sizes the dedup grid.
+#define TUNER_COARSE_RED_STEPS   4u    // reduction {0,10,20,30} dB
+#define TUNER_COARSE_RED_STEP    10.0f
+#define TUNER_COARSE_RES_STEPS   5u    // noise_rescale {0,0.5,1,1.5,2}
+#define TUNER_COARSE_RES_STEP    0.5f
+#define TUNER_REFINE_STEPS       4u    // +- half a coarse step per axis
+#define TUNER_REFINE_RED_STEP    (TUNER_COARSE_RED_STEP * 0.5f)  // 5 dB
+#define TUNER_REFINE_RES_STEP    (TUNER_COARSE_RES_STEP * 0.5f)  // 0.25
+#define TUNER_POLISH_STEPS       11u   // smoothing/whitening 0..100 in 10s
+#define TUNER_POLISH_STEP        10.0f
+#define TUNER_POLISH2_STEPS      2u    // +-5 around the best polish value
+#define TUNER_POLISH2_STEP       5.0f
+#define TUNER_COARSE_COUNT       (TUNER_COARSE_RED_STEPS * TUNER_COARSE_RES_STEPS)
+#define TUNER_PLANNED_TOTAL      (TUNER_COARSE_COUNT + TUNER_REFINE_STEPS + \
+                                  2 * TUNER_POLISH_STEPS + 2 * TUNER_POLISH2_STEPS)
+
 // Candidate parameter set (mirrors the denoiser's tunable knobs).
 typedef struct {
     float reduction_db;   // 0..30
@@ -98,8 +118,8 @@ typedef struct TunerCore {
     int grid_ri, grid_ni;               // coarse-grid indices
     int refine_idx, polish_idx;         // refine/polish indices
     int coarse_count, refine_count;     // scored-grid dedup lists
-    float coarse_grid[63][2];
-    float refine_grid[4][2];
+    float coarse_grid[TUNER_COARSE_COUNT][2];
+    float refine_grid[TUNER_REFINE_STEPS][2];
     uint32_t block_pos;                 // block index within current candidate
     bool candidate_failed;              // current candidate process failed
     bool budget_exhausted;              // search stopped early by the budget

@@ -289,20 +289,46 @@ static bool whitening_fake_process(const float *input, uint32_t samples,
     return true;
 }
 
-void test_whitening_drives_to_zero_under_fake_process(void) {
+// Fake denoiser whose output is cleanest at (red=15, res=1) — a cell only
+// the refine pass can reach once the coarse grid steps are 10 dB / 0.5
+// (issue 27). A pure output gain cannot rank candidates (the Goertzel
+// score is a tone/residual ratio, invariant to global scaling), so the
+// fake dilutes the signal with ring noise, alpha growing away from the
+// peak: out = (1-a)*in + a*noise, a = 0.1*|red-15| + 0.25*|res-1|.
+static bool midpoint_fake_process(const float *input, uint32_t samples,
+                                  const TunerParams *params, float *output,
+                                  void *userdata) {
+    FakeUd *ud = (FakeUd *)userdata;
+    float alpha = 0.1f * fabsf(params->reduction_db - 15.0f) +
+                  0.25f * fabsf(params->noise_rescale - 1.0f);
+    if (alpha > 1.0f) alpha = 1.0f;
+    for (uint32_t i = 0; i < samples; i++) {
+        float ring_v = (float)ud->ring[i % ud->ring_len] / 32768.0f;
+        output[i] = input[i] * (1.0f - alpha) + ring_v * alpha;
+    }
+    return true;
+}
+
+void test_refine_scores_midpoints_after_coarse_grid(void) {
+    // Coarse cells (10,1) and (20,1) tie for the local best; refine's
+    // +5 dB probe reaches the unique gain peak at (15,1), which proves
+    // the refine pass scored real midpoints instead of being deduped.
     TunerConfig cfg = default_config();
     int16_t ring[TEST_RING_LEN];
-    make_noise_ring(ring, TEST_RING_LEN, 555u);
+    make_noise_ring(ring, TEST_RING_LEN, 808u);
     FakeUd ud = {ring, TEST_RING_LEN};
 
     TunerCore core;
     tuner_core_init(&core, &cfg);
     TunerResult r = tuner_core_run(&core, ring, TEST_RING_LEN,
-                                   whitening_fake_process, &ud, NULL, NULL);
+                                   midpoint_fake_process, &ud, NULL, NULL);
     TEST_ASSERT_TRUE(r.ok);
     TEST_ASSERT_FALSE(r.budget_exhausted);
-    TEST_ASSERT_TRUE(r.params.whitening_pct == 0.0f);
-    TEST_ASSERT_TRUE(r.params.smoothing_pct == 10.0f);  // fake ignores it: ties keep the start value
+    TEST_ASSERT_EQUAL_UINT32(50, r.candidates_run);  // 20 coarse + 4 refine + 26 polish
+    TEST_ASSERT_TRUE(r.params.reduction_db == 15.0f);   // refine midpoint
+    TEST_ASSERT_TRUE(r.params.noise_rescale == 1.0f);
+    TEST_ASSERT_TRUE(r.params.smoothing_pct == 10.0f);  // ties keep the start value
+    TEST_ASSERT_TRUE(r.params.whitening_pct == 10.0f);
 }
 
 // ── Progress callback ─────────────────────────────────────────────────────────
@@ -326,18 +352,20 @@ void test_progress_fractions_monotone_and_bounded(void) {
     TunerConfig cfg = default_config();
     int16_t ring[TEST_RING_LEN];
     make_noise_ring(ring, TEST_RING_LEN, 31337u);
+    FakeUd ud = {ring, TEST_RING_LEN};
 
     ProgressLog log = {{0}, 0};
     TunerCore core;
     tuner_core_init(&core, &cfg);
     TunerResult r = tuner_core_run(&core, ring, TEST_RING_LEN,
-                                   identity_process, NULL, progress_cb, &log);
+                                   midpoint_fake_process, &ud, progress_cb, &log);
     TEST_ASSERT_TRUE(r.ok);
     TEST_ASSERT_EQUAL_UINT32(r.candidates_run, log.count);
     for (uint32_t i = 1; i < log.count; i++) {
         TEST_ASSERT_TRUE(log.fractions[i] >= log.fractions[i - 1]);
         TEST_ASSERT_TRUE(log.fractions[i] <= 1.0f);
     }
+    TEST_ASSERT_TRUE(log.fractions[log.count - 1] == 1.0f);  // plan fully reported
 }
 
 // ── Input guards ──────────────────────────────────────────────────────────────
@@ -382,7 +410,7 @@ void run_tuner_core_tests(void) {
     RUN_TEST(test_run_is_deterministic);
     RUN_TEST(test_run_respects_hard_budget);
     RUN_TEST(test_run_respects_param_bounds);
-    RUN_TEST(test_whitening_drives_to_zero_under_fake_process);
+    RUN_TEST(test_refine_scores_midpoints_after_coarse_grid);
     RUN_TEST(test_progress_fractions_monotone_and_bounded);
     RUN_TEST(test_invalid_inputs_rejected);
     RUN_TEST(test_zero_ring_is_valid_and_scores_positive);

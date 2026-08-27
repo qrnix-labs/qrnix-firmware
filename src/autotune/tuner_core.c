@@ -11,15 +11,17 @@
 //
 // Search (deterministic; no RNG, closed-form synthesis, fixed order,
 // first-best tie-break):
-//   1. coarse 2-D grid: reduction {0,5,..,30} x noise_rescale {0,0.25,..,2}
-//   2. local refine: +-1 step around the best cell in both axes
+//   1. coarse 2-D grid: reduction {0,10,..,30} x noise_rescale {0,0.5,..,2}
+//   2. local refine: one midpoint probe per axis around the best cell
+//      (+-5 dB, +-0.25 res), recovering the pre-coarsening resolution
 //   3. 1-D polish: smoothing {0,10,..,100}, then whitening {0,10,..,100}
 //      (whitening is unclamped at the low end: the search may drive it to 0)
 //   4. budget-permitting second polish at 5% steps around the best
 //      smoothing and whitening values
-// Planned total = 63 + 4 + 11 + 11 + 2 + 2 = 93 candidates; the progress
-// fraction is candidates_run / 93 capped at 1.0. The hard time budget is
-// checked after every candidate; a full plan never starts when exhausted.
+// Planned total = 20 + 4 + 11 + 11 + 2 + 2 = 50 candidates (issue 27,
+// TUNER_PLANNED_TOTAL in tuner_core.h); the progress fraction is
+// candidates_run / 50 capped at 1.0. The hard time budget is checked
+// after every candidate; a full plan never starts when exhausted.
 //
 // Execution is resumable (issue 9): begin()/step()/finish() drive the
 // search one 128-sample block per step so the firmware loop keeps polling
@@ -325,18 +327,18 @@ static bool next_candidate(TunerCore *core) {
     for (;;) {
         switch (core->phase) {
         case SEARCH_COARSE: {
-            if (core->grid_ni > 8) {
+            if (core->grid_ni > TUNER_COARSE_RES_STEPS - 1) {
                 core->grid_ni = 0;
                 core->grid_ri++;
             }
-            if (core->grid_ri > 6) {
+            if (core->grid_ri > TUNER_COARSE_RED_STEPS - 1) {
                 core->phase = SEARCH_REFINE;
                 core->refine_idx = 0;
                 continue;
             }
             TunerParams p = core->start;
-            p.reduction_db = (float)(core->grid_ri * 5);
-            p.noise_rescale = (float)core->grid_ni * 0.25f;
+            p.reduction_db = (float)core->grid_ri * TUNER_COARSE_RED_STEP;
+            p.noise_rescale = (float)core->grid_ni * TUNER_COARSE_RES_STEP;
             core->coarse_grid[core->coarse_count][0] = p.reduction_db;
             core->coarse_grid[core->coarse_count][1] = p.noise_rescale;
             core->coarse_count++;
@@ -347,7 +349,7 @@ static bool next_candidate(TunerCore *core) {
             return true;
         }
         case SEARCH_REFINE: {
-            if (core->refine_idx >= 4) {
+            if (core->refine_idx >= TUNER_REFINE_STEPS) {
                 core->phase = SEARCH_SMOOTH;
                 core->polish_idx = 0;
                 continue;
@@ -357,10 +359,10 @@ static bool next_candidate(TunerCore *core) {
             float cr = red;
             float cn = res;
             switch (core->refine_idx) {
-            case 0: cr = red - 5.0f; break;
-            case 1: cr = red + 5.0f; break;
-            case 2: cn = res - 0.25f; break;
-            default: cn = res + 0.25f; break;
+            case 0: cr = red - TUNER_REFINE_RED_STEP; break;
+            case 1: cr = red + TUNER_REFINE_RED_STEP; break;
+            case 2: cn = res - TUNER_REFINE_RES_STEP; break;
+            default: cn = res + TUNER_REFINE_RES_STEP; break;
             }
             core->refine_idx++;
             if (cr < 0.0f) cr = 0.0f;
@@ -383,13 +385,13 @@ static bool next_candidate(TunerCore *core) {
             return true;
         }
         case SEARCH_SMOOTH: {
-            if (core->polish_idx > 10) {
+            if (core->polish_idx > TUNER_POLISH_STEPS - 1) {
                 core->phase = SEARCH_WHITEN;
                 core->polish_idx = 0;
                 continue;
             }
             TunerParams p = core->best;
-            p.smoothing_pct = (float)(core->polish_idx * 10);
+            p.smoothing_pct = (float)(core->polish_idx * TUNER_POLISH_STEP);
             core->polish_idx++;
             core->current = p;
             core->block_pos = 0;
@@ -397,13 +399,13 @@ static bool next_candidate(TunerCore *core) {
             return true;
         }
         case SEARCH_WHITEN: {
-            if (core->polish_idx > 10) {
+            if (core->polish_idx > TUNER_POLISH_STEPS - 1) {
                 core->phase = SEARCH_SMOOTH2;
                 core->polish_idx = 0;
                 continue;
             }
             TunerParams p = core->best;
-            p.whitening_pct = (float)(core->polish_idx * 10);
+            p.whitening_pct = (float)(core->polish_idx * TUNER_POLISH_STEP);
             core->polish_idx++;
             core->current = p;
             core->block_pos = 0;
@@ -411,13 +413,14 @@ static bool next_candidate(TunerCore *core) {
             return true;
         }
         case SEARCH_SMOOTH2: {
-            if (core->polish_idx >= 2) {
+            if (core->polish_idx >= TUNER_POLISH2_STEPS) {
                 core->phase = SEARCH_WHITEN2;
                 core->polish_idx = 0;
                 continue;
             }
             TunerParams p = core->best;
-            p.smoothing_pct += core->polish_idx == 0 ? -5.0f : 5.0f;
+            p.smoothing_pct += core->polish_idx == 0 ? -TUNER_POLISH2_STEP
+                                                     : TUNER_POLISH2_STEP;
             core->polish_idx++;
             core->current = clamp_to_bounds(p);
             core->block_pos = 0;
@@ -425,12 +428,13 @@ static bool next_candidate(TunerCore *core) {
             return true;
         }
         case SEARCH_WHITEN2: {
-            if (core->polish_idx >= 2) {
+            if (core->polish_idx >= TUNER_POLISH2_STEPS) {
                 core->phase = SEARCH_DONE;
                 return false;
             }
             TunerParams p = core->best;
-            p.whitening_pct += core->polish_idx == 0 ? -5.0f : 5.0f;
+            p.whitening_pct += core->polish_idx == 0 ? -TUNER_POLISH2_STEP
+                                                     : TUNER_POLISH2_STEP;
             core->polish_idx++;
             core->current = clamp_to_bounds(p);
             core->block_pos = 0;
@@ -466,7 +470,7 @@ bool tuner_core_begin(TunerCore *core, const int16_t *noise_ring,
     core->have_best = false;
     core->best_score = TUNER_SCORE_MIN_DB;
     core->budget_exhausted = false;
-    core->planned_total = 63 + 4 + 11 + 11 + 2 + 2;  // see header comment
+    core->planned_total = TUNER_PLANNED_TOTAL;  // see tuner_core.h
     core->phase = SEARCH_COARSE;
     core->grid_ri = 0;
     core->grid_ni = 0;

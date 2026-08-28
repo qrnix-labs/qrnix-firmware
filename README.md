@@ -71,6 +71,7 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 | `src/shared/` | Vendored libspecbleach DSP core (42 files) — upstream code, see License. |
 | `src/interfaces/` | Processor interface definition. |
 | `include/` | Public API headers for the DSP core. |
+| `src/serial_contract.*`, `src/serial_identity.*` | JSON wire contract (status/boot/crash envelopes, ADR-0003) and OCOTP unit-serial identity (ADR-0006), both host-tested. |
 | `platformio.ini` | Build environment (`teensy40`), include paths, library deps. |
 
 ## Code map
@@ -87,7 +88,7 @@ All user-facing logic lives in `src/qrnix.cpp` (~800 lines, single file):
 | Auto-tune flow | capture guards + ring in `loop()`, search driver, `start_tune()` / `abort_tune()` / `apply_tune_result()`, catch-window handoff in the knob reads, `src/autotune/` |
 | Tone-kill / post-filter sync in bypass | `sync_tk_bypass_processor()`|
 | OLED screens | `update_boot_splash()`, `update_display()` |
-| Version string (shown at boot) | `SOFTWARE_VERSION` (`qrnix.cpp:88`, currently `0.3.13`) |
+| Version string (shown at boot) | `SOFTWARE_VERSION` (`qrnix.cpp:94`, currently `0.3.15`) |
 | Pin assignments, OLED address | `#define`s at the top of `qrnix.cpp` |
 
 ## Engineering constraints (read before patching)
@@ -112,18 +113,27 @@ All user-facing logic lives in `src/qrnix.cpp` (~800 lines, single file):
 `setup()` reports its stages (`setup: USB serial ready`, `setup: codec ready`,
 `setup: display ready`, `setup: complete`) so you can see how far boot got.
 
-Once per second, `loop()` prints a status line:
+Once per second, `loop()` prints a status envelope (ADR-0003, `cv=1`):
 
 ```text
-m=2 src=L red=12.0 sm=55.0 wh=30.0 ag=1.20 tk=0 pp=0 clip=0 blk_l=0 blk_r=0 in_l=1234 in_r=1200 lvl_l=87.0 lvl_r=12.0 out_l=1230 out_r=0 bad=0
+{"t":"status","cv":1,"m":2,"src":"L","red":12,"sm":55,"wh":30,"ag":1,"lk":0,"tk":0,"pp":0,"clip":0,"blk_l":0,"blk_r":0,"in_l":1234,"in_r":1200,"lvl_l":87,"lvl_r":12,"out_l":1230,"out_r":0,"bad":0,"up":123,"ver":"0.3.15","sn":"0123456789ABCDEF"}
 ```
+
+`red`/`sm`/`wh`/`ag` are the pot-derived values as integers (`ag` is 0..2);
+`lk` is the catch-window lock mask (0 = manual, 0xF = all four locked);
+`up` is seconds since boot; `ver` is the firmware version; `sn` is the unit
+serial (16 uppercase hex digits from the OCOTP fuses, ADR-0006). The tail
+fields `snr_min`/`snr_avg`/`snr_max`, `bands_aggression`/`bands_bypassed`, and
+`gain`/`mix` are only emitted in NR2 mode.
 
 Auto-tune adds its own lines around the capture/tune flow: `capture: start`,
 `capture: complete`, `capture: aborted`, `tune: ring N samples`, `tune: start`,
-`tune: progress NN%`, `tune: complete red=… sm=… wh=… ag=… score=…`,
-`tune: aborted`, the guard aborts `tune: abort clip` / `tune: abort quiet`,
-the catch-window transitions `tune: unlock red|sm|wh|ag val=…`, `tune: unlock all - manual`, and the exit line `tune: cleared`. While a tune is latched the
-status line reports the tuned values, not the pots.
+`tune: progress NN%`, `tune: lock 0xF` (when the result latches),
+`tune: complete red=… sm=… wh=… ag=… score=…`, `tune: aborted`, the guard
+aborts `tune: abort clip` / `tune: abort quiet`, the catch-window transitions
+`tune: unlock red|sm|wh|ag val=…`, `tune: unlock all - manual`, and the exit
+line `tune: cleared`. While a tune is latched the status line reports the
+tuned values, not the pots.
 
 A `CrashReport` printed once after a successful boot describes the previous
 crash retained by the Teensy; repeated healthy status lines after

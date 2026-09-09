@@ -353,7 +353,10 @@ void setup() {
     codec.enable();
     codec.inputSelect(AUDIO_INPUT_LINEIN);
     codec.lineInLevel(15);      // maximum sensitivity (0.24 Vpp full scale)
-    codec.volume(0.65);         // output level
+    // Output level: dacVolume() attenuates the DAC signal that feeds the
+    // line-out pins AND the headphone amp. codec.volume() only drives the
+    // headphone amp and has no effect on the line-out (Rev D).
+    codec.dacVolume(0.65);
     record_queue_l.begin();     // left input drives both line-output channels
     record_queue_r.begin();     // right input is monitored but not processed
     emit_boot_line("codec ready");
@@ -452,13 +455,14 @@ void loop() {
     const uint16_t pot_ag = analogRead(PIN_AGGRESSION);
     // Volume (A8) — standalone output control, never a tune parameter:
     // independent of the tuned_latch / catch-window logic above and below.
-    // codec.volume(0.65) in setup() is the pre-loop default; the first
-    // committed read replaces it. Linear pot on the codec's digital volume
-    // (0.5 dB steps) gives a conventional audio-taper feel.
+    // dacVolume(0.65) in setup() is the pre-loop default; the first
+    // committed read replaces it. DAC volume is 0.5 dB digital steps over
+    // the whole signal path (line-out + headphone), so a linear pot gives
+    // a conventional audio-taper feel.
     static bool vol_init = false;
     static uint16_t last_vol_raw = 0;
     static unsigned long last_vol_write = 0;
-    static int volume_pct = 65;  // matches the codec.volume(0.65) boot default
+    static int volume_pct = 65;  // matches the dacVolume(0.65) boot default
     const uint16_t vol_raw = (uint16_t)analogRead(PIN_VOLUME);
     const int vol_delta = (int)vol_raw - (int)last_vol_raw;
     if (!vol_init ||
@@ -468,7 +472,7 @@ void loop() {
         vol_init = true;
         last_vol_raw = vol_raw;
         last_vol_write = millis();
-        codec.volume(vol_raw * (1.0f / 1023.0f));
+        codec.dacVolume(vol_raw * (1.0f / 1023.0f));
         volume_pct = (int)lroundf(vol_raw * (100.0f / 1023.0f));
     }
     if (tuned_latch && !tune_active) {

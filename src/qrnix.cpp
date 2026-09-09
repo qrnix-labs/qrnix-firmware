@@ -128,6 +128,7 @@ uint32_t nr1_cached_profile_blocks = 0;
 int16_t *tune_ring = nullptr;            // raw int16 capture ring, allocated once
 uint32_t tune_ring_pos = 0;              // wrap write position during capture
 bool tune_active = false;                // tune run in progress (stub until issue 9)
+bool capture_will_tune = false;          // capture completion chains into start_tune() (A-hold fallback only)
 int tune_notice = 0;                     // persistent status chip: 0 none, 1 CLIP, 2 QUIET
 unsigned long tune_notice_until = 0;     // full-screen notice deadline (millis)
 const char *fullscreen_notice = nullptr; // overlay text while the deadline is live
@@ -263,7 +264,7 @@ void handle_a_tap();
 void handle_a_hold();
 void handle_b_tap();
 void handle_c_tap();
-void start_noise_capture();
+void start_noise_capture(bool chain_to_tune);
 void abort_noise_capture();
 void start_tune();
 void abort_tune();
@@ -709,14 +710,18 @@ void loop() {
         capture_clipped = false;
         capture_power_sum = 0;
         capture_blocks = 0;
+        // Only a hold-fallback capture (A hold with no profile yet) chains
+        // into the tune; a tap capture samples the noise floor and stops.
+        const bool chain_to_tune = capture_will_tune;
+        capture_will_tune = false;
         if (clipped) {
             show_tune_notice(1);  // CLIP chip
             Serial.println("tune: abort clip");
         } else if (quiet) {
             show_tune_notice(2);  // QUIET chip
             Serial.println("tune: abort quiet");
-        } else {
-            start_tune();  // capture leads into the real search (issue 9)
+        } else if (chain_to_tune) {
+            start_tune();  // hold fallback: capture leads into the search
         }
     }
 
@@ -941,11 +946,13 @@ void apply_params() {
 
 void handle_a_tap() {
     // NR1: sample the noise floor (1 s, atomic — the old profile survives
-    // until the new capture completes). Non-NR1 presses never reach here:
-    // they are consumed at the press edge with the SPECTRAL ONLY hint.
+    // until the new capture completes). A tap capture never starts a tune:
+    // only the A-hold fallback chains into the search. Non-NR1 presses
+    // never reach here: they are consumed at the press edge with the
+    // SPECTRAL ONLY hint.
     if (current_mode != 1 || nr1_noise_learning || tune_active) return;
     clear_tune_notice();
-    start_noise_capture();
+    start_noise_capture(false);
 }
 
 void handle_a_hold() {
@@ -957,7 +964,7 @@ void handle_a_hold() {
     if (nr1_cached_profile) {
         start_tune();
     } else {
-        start_noise_capture();
+        start_noise_capture(true);
     }
 }
 
@@ -999,7 +1006,7 @@ void sync_tk_bypass_processor() {
     }
 }
 
-void start_noise_capture() {
+void start_noise_capture(bool chain_to_tune) {
     if (current_mode != 1 || !nr1 || nr1_noise_learning) return;
     if (tune_active) {
         abort_tune();  // re-capture replaces a pending tune
@@ -1008,6 +1015,7 @@ void start_noise_capture() {
     specbleach_reset_noise_profile(nr1);  // fresh internal profile; cache intact
     nr1_noise_learning = true;
     nr1_capture_start = millis();
+    capture_will_tune = chain_to_tune;
     params.learn_noise = 2;
     apply_params();
     Serial.println("capture: start");
@@ -1016,6 +1024,7 @@ void start_noise_capture() {
 void abort_noise_capture() {
     if (!nr1_noise_learning) return;
     nr1_noise_learning = false;
+    capture_will_tune = false;
     params.learn_noise = 0;
     apply_params();
     // The partial capture is discarded; the last good profile (if any) is

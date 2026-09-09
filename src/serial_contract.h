@@ -1,4 +1,4 @@
-// Wire contract v1 emission (ADR-0003).
+// Wire contract v2 emission (ADR-0003).
 //
 // Pure C, no Arduino dependencies: builds the JSON envelopes the QRNix
 // manager parses. One object per line, `\n`-terminated by the caller,
@@ -6,19 +6,21 @@
 //
 // Contract version is a compile-time constant here; bumping it is an
 // append-only protocol change per ADR-0003 (managers ignore unknown keys).
+// v2 (0.3.90 dev): adds the `vol` key to the status envelope.
 #ifndef SERIAL_CONTRACT_H
 #define SERIAL_CONTRACT_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define WIRE_CONTRACT_VERSION 1
+#define WIRE_CONTRACT_VERSION 2
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /// All values of one status envelope. Tail fields are only emitted when
-/// `have_tail` is non-zero (NR2 mode); `lk`/`up`/`ver`/`sn` are always emitted.
+/// `have_tail` is non-zero (NR2 mode); `lk`/`up`/`ver`/`sn`/`vol` are always
+/// emitted.
 typedef struct {
     int mode;                  // 0 = OFF, 1 = NR1, 2 = NR2
     char src;                  // 'L' or 'R' (selected input channel)
@@ -50,6 +52,7 @@ typedef struct {
     uint64_t up;               // seconds since boot
     const char *ver;           // firmware version (SOFTWARE_VERSION)
     const char *sn;            // unit serial: 16 uppercase hex digits, no prefix (ADR-0006)
+    int vol;                   // codec volume, percent 0..100 (v2, additive)
 } ContractStatus;
 
 /// Build a status envelope into `buf` (NUL-terminated). Returns the number

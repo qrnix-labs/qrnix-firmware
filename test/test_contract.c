@@ -43,6 +43,7 @@ static ContractStatus full_status(void) {
     s.up = 100;
     s.ver = "0.3.12";
     s.sn = "0123456789ABCDEF";
+    s.vol = 65;
     return s;
 }
 
@@ -62,7 +63,7 @@ void test_status_full_envelope(void) {
     size_t n = contract_status_line(line, sizeof(line), &s);
 
     TEST_ASSERT_TRUE(n > 0);
-    TEST_ASSERT_TRUE(strstr(line, "{\"t\":\"status\",\"cv\":1,") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "{\"t\":\"status\",\"cv\":2,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"m\":2") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"src\":\"L\"") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"red\":40,") != NULL);
@@ -92,6 +93,8 @@ void test_status_full_envelope(void) {
     TEST_ASSERT_TRUE(strstr(line, "\"up\":100,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"ver\":\"0.3.12\"") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"ver\":\"0.3.12\",\"sn\":\"0123456789ABCDEF\"") != NULL);
+    // vol rides last (append-only v2 key), always present.
+    TEST_ASSERT_TRUE(strstr(line, "\"sn\":\"0123456789ABCDEF\",\"vol\":65}") != NULL);
     assert_envelope(line);
 }
 
@@ -122,10 +125,11 @@ void test_status_no_tail(void) {
     TEST_ASSERT_NULL(strstr(line, "bands_"));
     TEST_ASSERT_NULL(strstr(line, "\"gain\""));
     TEST_ASSERT_NULL(strstr(line, "\"mix\""));
-    // up/ver/sn are always present.
+    // up/ver/sn/vol are always present.
     TEST_ASSERT_TRUE(strstr(line, "\"up\":100,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"ver\":\"0.3.12\"") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"sn\":\"0123456789ABCDEF\"") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "\"vol\":65") != NULL);
     assert_envelope(line);
 }
 
@@ -158,12 +162,14 @@ void test_status_zero_mode_and_values(void) {
     s.clip = 0;
     s.bad = 0;
     s.up = 0;
+    s.vol = 0;
     contract_status_line(line, sizeof(line), &s);
     TEST_ASSERT_TRUE(strstr(line, "\"m\":0") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"red\":0,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"lk\":0,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"bad\":0,") != NULL);
     TEST_ASSERT_TRUE(strstr(line, "\"up\":0,") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "\"vol\":0}") != NULL);
     assert_envelope(line);
 }
 

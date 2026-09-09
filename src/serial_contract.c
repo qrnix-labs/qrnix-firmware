@@ -1,4 +1,4 @@
-// Wire contract v1 emission (ADR-0003) — see serial_contract.h.
+// Wire contract v2 emission (ADR-0003) — see serial_contract.h.
 //
 // Pure C (snprintf only): no Arduino, no malloc. Truncation is clamped:
 // the builder never writes past `cap - 1` and always NUL-terminates.
@@ -152,6 +152,8 @@ size_t contract_status_line(char *buf, size_t cap, const ContractStatus *s) {
     b_str(&b, s->ver != NULL ? s->ver : "");
     b_raw(&b, ",\"sn\":");
     b_str(&b, s->sn != NULL ? s->sn : "");
+    b_raw(&b, ",\"vol\":");
+    b_fmt(&b, "%d", s->vol);
     b_raw(&b, "}");
     return b.n;
 }

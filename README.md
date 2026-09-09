@@ -27,6 +27,7 @@ hardware:
 | A1 | Smoothing pot | same wiring |
 | A2 | Whitening pot | same wiring |
 | A3 | Aggression pot | same wiring |
+| A8 | Volume pot | same wiring (new control; breadboard prototype) |
 | D3 | Mode switch — Adaptive | `LOW` selects; center-off = bypass |
 | D4 | Mode switch — Spectral | `LOW` selects; center-off = bypass |
 | D2 | Button | active LOW, internal pullup |
@@ -113,13 +114,15 @@ All user-facing logic lives in `src/qrnix.cpp` (~800 lines, single file):
 `setup()` reports its stages (`setup: USB serial ready`, `setup: codec ready`,
 `setup: display ready`, `setup: complete`) so you can see how far boot got.
 
-Once per second, `loop()` prints a status envelope (ADR-0003, `cv=1`):
+Once per second, `loop()` prints a status envelope (ADR-0003, `cv=2`):
 
 ```text
-{"t":"status","cv":1,"m":2,"src":"L","red":12,"sm":55,"wh":30,"ag":1,"lk":0,"tk":0,"pp":0,"clip":0,"blk_l":0,"blk_r":0,"in_l":1234,"in_r":1200,"lvl_l":87,"lvl_r":12,"out_l":1230,"out_r":0,"bad":0,"up":123,"ver":"0.3.15","sn":"0123456789ABCDEF"}
+{"t":"status","cv":2,"m":2,"src":"L","red":12,"sm":55,"wh":30,"ag":1,"lk":0,"tk":0,"pp":0,"clip":0,"blk_l":0,"blk_r":0,"in_l":1234,"in_r":1200,"lvl_l":87,"lvl_r":12,"out_l":1230,"out_r":0,"bad":0,"up":123,"ver":"0.3.90","sn":"0123456789ABCDEF","vol":65}
 ```
 
 `red`/`sm`/`wh`/`ag` are the pot-derived values as integers (`ag` is 0..2);
+`vol` is the codec volume pot as percent (0–100, appended last — contract v2
+is additive; managers that only know v1 ignore the key);
 `lk` is the catch-window lock mask (0 = manual, 0xF = all four locked);
 `up` is seconds since boot; `ver` is the firmware version; `sn` is the unit
 serial (16 uppercase hex digits from the OCOTP fuses, ADR-0006). The tail

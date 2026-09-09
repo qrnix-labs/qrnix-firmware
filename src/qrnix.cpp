@@ -88,6 +88,7 @@ bool specbleach_adaptive_get_diagnostics(SpectralBleachHandle instance,
 #define PIN_MODE_ADAPTIVE  3
 #define PIN_MODE_SPECTRAL  4
 #define PIN_ENC_BUTTON     2
+#define PIN_VOLUME         A8
 
 // 30 dB leaves about 3.16% of the rejected spectrum's amplitude.
 constexpr float REDUCTION_MAX_DB = 30.0f;
@@ -150,6 +151,10 @@ CatchLock tune_lock;                     // per-param catch windows (issue 12)
 SpectralProcessorHandle tk_bypass = nullptr;  // lazy notch STFT, bypass+TK only
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 30;
 constexpr unsigned long LONG_PRESS_MS = 500;
+// Volume pot: commit at most once per 50 ms and only outside a 3 LSB
+// noise band, so I2C codec writes do not happen per loop iteration.
+constexpr unsigned long VOLUME_WRITE_MIN_MS = 50;
+constexpr int VOLUME_HYSTERESIS_LSB = 3;
 
 // ── Auto-tune (issue 8): capture ring, guards, tune skeleton ────────────────
 
@@ -391,6 +396,27 @@ void loop() {
     const uint16_t pot_sm = analogRead(PIN_SMOOTHING);
     const uint16_t pot_wh = analogRead(PIN_WHITENING);
     const uint16_t pot_ag = analogRead(PIN_AGGRESSION);
+    // Volume (A8) — standalone output control, never a tune parameter:
+    // independent of the tuned_latch / catch-window logic above and below.
+    // codec.volume(0.65) in setup() is the pre-loop default; the first
+    // committed read replaces it. Linear pot on the codec's digital volume
+    // (0.5 dB steps) gives a conventional audio-taper feel.
+    static bool vol_init = false;
+    static uint16_t last_vol_raw = 0;
+    static unsigned long last_vol_write = 0;
+    static int volume_pct = 65;  // matches the codec.volume(0.65) boot default
+    const uint16_t vol_raw = (uint16_t)analogRead(PIN_VOLUME);
+    const int vol_delta = (int)vol_raw - (int)last_vol_raw;
+    if (!vol_init ||
+        ((vol_delta >= VOLUME_HYSTERESIS_LSB ||
+          vol_delta <= -VOLUME_HYSTERESIS_LSB) &&
+         millis() - last_vol_write >= VOLUME_WRITE_MIN_MS)) {
+        vol_init = true;
+        last_vol_raw = vol_raw;
+        last_vol_write = millis();
+        codec.volume(vol_raw * (1.0f / 1023.0f));
+        volume_pct = (int)lroundf(vol_raw * (100.0f / 1023.0f));
+    }
     if (tuned_latch && !tune_active) {
         // Catch-window handoff (issue 12): each pot that parks inside its
         // window takes over its parameter; all four unlocked returns the
@@ -466,6 +492,7 @@ void loop() {
         st.sm = (int)lroundf(params.smoothing_factor);
         st.wh = (int)lroundf(params.whitening_factor);
         st.ag = (int)lroundf(params.noise_rescale);
+        st.vol = volume_pct;
         st.lk = tuned_latch ? (int)tune_lock.lock_mask : 0;
         st.tk = params.tone_kill_enabled ? 1 : 0;
         st.pp = params.post_filter_enabled ? 1 : 0;

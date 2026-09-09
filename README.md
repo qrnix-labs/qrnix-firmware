@@ -80,7 +80,7 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 
 ## Code map
 
-All user-facing logic lives in `src/qrnix.cpp` (~800 lines, single file):
+All user-facing logic lives in `src/qrnix.cpp` (~1450 lines, single file):
 
 | Want to change… | Look at |
 |---|---|
@@ -89,10 +89,11 @@ All user-facing logic lives in `src/qrnix.cpp` (~800 lines, single file):
 | Default/reference parameter values | `set_default_params()`, `apply_params()` |
 | Mode switching (free/recreate of DSP cores) | `activate_mode()`, `read_mode_switch()` |
 | Button behavior (A tap = capture, A hold = tune, B = TK, C = PP) | `handle_a_tap()`, `handle_a_hold()`, `handle_b_tap()`, `handle_c_tap()`, `DebouncedButton` in `loop()` |
+| Output volume (A8 → `codec.dacVolume`, −60..0 dB taper) | volume block in `loop()`, `VOLUME_RANGE_DB` / `DAC_VOLUME_DB_SPAN` |
 | Auto-tune flow | capture guards + ring in `loop()`, search driver, `start_tune()` / `abort_tune()` / `apply_tune_result()`, catch-window handoff in the knob reads, `src/autotune/` |
 | Tone-kill / post-filter sync in bypass | `sync_tk_bypass_processor()`|
 | OLED screens | `update_boot_splash()`, `update_display()` |
-| Version string (shown at boot) | `SOFTWARE_VERSION` (`qrnix.cpp:94`, currently `0.3.15`) |
+| Version string (shown at boot) | `SOFTWARE_VERSION` (`qrnix.cpp:94`, currently `0.3.90` dev) |
 | Pin assignments, OLED address | `#define`s at the top of `qrnix.cpp` |
 
 ## Engineering constraints (read before patching)
@@ -102,6 +103,15 @@ All user-facing logic lives in `src/qrnix.cpp` (~800 lines, single file):
   selected one.
 - **Frame size API:** the libspecbleach frame-size API takes milliseconds —
   the code passes `25.0f`, not `0.025f`.
+- **`codec.volume()` ≠ output level.** It writes the headphone-amp register
+  (`CHIP_ANA_HP_CTRL`) and only affects the shield's headphone jack. The
+  line-out level control is `codec.dacVolume()` (`CHIP_DAC_VOL`), upstream
+  of both outputs — the volume pot drives that. The driver's `enable()`
+  also leaves the headphone amp at minimum volume + flagged muted, so
+  `setup()` calls `codec.volume(0.8f)` once for a sane ~0 dB amp gain.
+- **Volume taper:** the pot spans 0 dB (full scale) to −60 dB, linear in dB
+  over the rotation (`VOLUME_RANGE_DB`, `DAC_VOLUME_DB_SPAN`); `vol` in the
+  status envelope is rotation percent, not dB.
 - **FFT:** CMSIS-DSP requires a supported power-of-two FFT; both STFT
   configurations use `NEXT_POWER_OF_TWO`.
 - **Allocation failure:** if a processor cannot be allocated, the firmware

@@ -357,6 +357,10 @@ void setup() {
     // line-out pins AND the headphone amp. codec.volume() only drives the
     // headphone amp and has no effect on the line-out (Rev D).
     codec.dacVolume(0.65);
+    // The driver's enable() leaves the headphone amp at minimum volume
+    // (0x7F7F) and flagged muted; set a sane ~0 dB amp gain so headphones
+    // follow the same dacVolume pot as the line-out.
+    codec.volume(0.8f);
     record_queue_l.begin();     // left input drives both line-output channels
     record_queue_r.begin();     // right input is monitored but not processed
     emit_boot_line("codec ready");

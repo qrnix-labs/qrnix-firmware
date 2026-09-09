@@ -81,14 +81,17 @@ bool specbleach_adaptive_get_diagnostics(SpectralBleachHandle instance,
 
 // ── Pin map ──────────────────────────────────────────────────────────────────
 
-#define PIN_REDUCTION      A0
-#define PIN_SMOOTHING      A1
-#define PIN_WHITENING      A2
-#define PIN_AGGRESSION     A3
-#define PIN_MODE_ADAPTIVE  3
-#define PIN_MODE_SPECTRAL  4
-#define PIN_ENC_BUTTON     2
-#define PIN_VOLUME         A8
+#define PIN_REDUCTION           A0
+#define PIN_SMOOTHING           A1
+#define PIN_WHITENING           A2
+#define PIN_AGGRESSION          A3
+#define PIN_MODE_ADAPTIVE       3
+#define PIN_MODE_SPECTRAL       4
+#define PIN_BUTTON_CAPTURE_TUNE 2   // A — tap: sample noise floor, hold: auto-tune (Spectral only)
+#define PIN_BUTTON_TONE_KILLER  5   // B — tap: tone-kill toggle, all modes
+#define PIN_BUTTON_POST_FILTER  6   // C — tap: post-filter toggle, NR1/NR2 (dormant-armed in Bypass)
+#define PIN_BUTTON_RESERVED     9   // D — reserved; no function in this rev
+#define PIN_VOLUME              A8
 
 // 30 dB leaves about 3.16% of the rejected spectrum's amplitude.
 constexpr float REDUCTION_MAX_DB = 30.0f;
@@ -127,6 +130,7 @@ uint32_t tune_ring_pos = 0;              // wrap write position during capture
 bool tune_active = false;                // tune run in progress (stub until issue 9)
 int tune_notice = 0;                     // persistent status chip: 0 none, 1 CLIP, 2 QUIET
 unsigned long tune_notice_until = 0;     // full-screen notice deadline (millis)
+const char *fullscreen_notice = nullptr; // overlay text while the deadline is live
 bool capture_clipped = false;            // clip seen during the capture window
 uint64_t capture_power_sum = 0;          // quiet-guard accumulator (selected channel)
 uint32_t capture_blocks = 0;             // blocks metered during the capture window
@@ -155,6 +159,51 @@ constexpr unsigned long LONG_PRESS_MS = 500;
 // noise band, so I2C codec writes do not happen per loop iteration.
 constexpr unsigned long VOLUME_WRITE_MIN_MS = 50;
 constexpr int VOLUME_HYSTERESIS_LSB = 3;
+
+// ── Debounced buttons (controls expansion) ───────────────────────────────────
+
+// Momentary active-LOW button state machine. Taps fire on the debounced
+// release edge; holds fire once at the LONG_PRESS crossing and consume the
+// release so it cannot also tap. PRESSED edges let the caller cancel
+// in-flight work (capture/tune); consume() suppresses the rest of the press.
+struct DebouncedButton {
+    enum Event { NONE = 0, PRESSED = 1, TAP = 2, HOLD = 3 };
+
+    bool raw = false;
+    bool stable = false;
+    unsigned long changed_at = 0;
+    unsigned long press_started_at = 0;
+    bool long_dispatched = false;  // press resolved (hold fired / consumed / released)
+
+    Event update(bool sample, unsigned long now) {
+        if (sample != raw) {
+            raw = sample;
+            changed_at = now;
+        }
+        if (raw != stable && now - changed_at >= BUTTON_DEBOUNCE_MS) {
+            stable = raw;
+            if (stable) {
+                press_started_at = now;
+                long_dispatched = false;
+                return PRESSED;
+            }
+            // Debounced release: a tap unless the press was resolved already.
+            if (!long_dispatched) {
+                long_dispatched = true;
+                return TAP;
+            }
+            return NONE;
+        }
+        if (stable && !long_dispatched &&
+            now - press_started_at >= LONG_PRESS_MS) {
+            long_dispatched = true;  // hold consumes the release tap
+            return HOLD;
+        }
+        return NONE;
+    }
+
+    void consume() { long_dispatched = true; }
+};
 
 // ── Auto-tune (issue 8): capture ring, guards, tune skeleton ────────────────
 
@@ -210,15 +259,17 @@ void set_default_params();
 void apply_params();
 bool activate_mode(int mode);
 int  read_mode_switch();
-void handle_button_tap();
-void handle_button_hold();
-void advance_feature_circle();
+void handle_a_tap();
+void handle_a_hold();
+void handle_b_tap();
+void handle_c_tap();
 void start_noise_capture();
 void abort_noise_capture();
 void start_tune();
 void abort_tune();
 void show_tune_notice(int mode);
 void show_tune_cancel_notice();
+void show_spectral_only_notice();
 void clear_tune_notice();
 static uint32_t tune_now_ms(void);
 static bool tune_process_block(const float *input, uint32_t samples,
@@ -311,7 +362,10 @@ void setup() {
     // SPDT ON-OFF-ON switch: common to GND, outer terminals to D3 and D4.
     pinMode(PIN_MODE_ADAPTIVE, INPUT_PULLUP);
     pinMode(PIN_MODE_SPECTRAL, INPUT_PULLUP);
-    pinMode(PIN_ENC_BUTTON, INPUT_PULLUP);
+    pinMode(PIN_BUTTON_CAPTURE_TUNE, INPUT_PULLUP);
+    pinMode(PIN_BUTTON_TONE_KILLER, INPUT_PULLUP);
+    pinMode(PIN_BUTTON_POST_FILTER, INPUT_PULLUP);
+    pinMode(PIN_BUTTON_RESERVED, INPUT_PULLUP);
     set_default_params();
     current_mode = read_mode_switch();
     if (!activate_mode(current_mode)) {
@@ -374,7 +428,7 @@ void loop() {
         cmd[n] = '\0';
         if (strcmp(cmd, "tune:test") == 0) {
             if (current_mode == 1) {
-                handle_button_hold();  // same path as the physical hold
+                handle_a_hold();  // same path as the physical A hold
             } else {
                 Serial.println("tune: ERROR - trigger needs NR1 mode");
             }
@@ -554,59 +608,62 @@ void loop() {
         apply_params();
     }
 
-    // ── Encoder button — tap cycles features, hold runs the mode action ──────
-    // Tap (< 500 ms, on release): advance the feature circle (NR modes) or
-    // toggle tone-kill (bypass). Hold (>= 500 ms, at crossing, consumed):
-    // capture noise floor in NR1, clear all features in bypass, no-op in NR2.
+    // ── Buttons (controls expansion) ─────────────────────────────────────────
+    // A (D2): tap = sample the noise floor, hold = auto-tune — Spectral
+    // (NR1) only. Outside NR1 any press shows a SPECTRAL ONLY hint and is
+    // consumed. B (D5): tap = tone-kill toggle, all modes. C (D6): tap =
+    // post-filter toggle, NR1/NR2 (dormant-armed in Bypass). D (D9):
+    // reserved — debounced, no function.
 
-    static bool button_raw = false;
-    static bool button_stable = false;
-    static unsigned long button_changed_at = 0;
-    static unsigned long press_started_at = 0;
-    static bool long_dispatched = false;
+    static DebouncedButton btn_a, btn_b, btn_c, btn_d;
+    const unsigned long now_ms = millis();
 
-    const bool button_sample = digitalRead(PIN_ENC_BUTTON) == LOW;
-    if (button_sample != button_raw) {
-        button_raw = button_sample;
-        button_changed_at = millis();
-    }
-    if (button_raw != button_stable &&
-        millis() - button_changed_at >= BUTTON_DEBOUNCE_MS) {
-        button_stable = button_raw;
-        if (button_stable) {
-            press_started_at = millis();
-            long_dispatched = false;
-            // A press during an active capture cancels it (atomic: the old
-            // profile is kept). The press is consumed so it cannot also
-            // dispatch a tap or hold.
-            if (nr1_noise_learning) {
-                abort_noise_capture();
-                long_dispatched = true;
-            } else if (tune_active) {
-                // A press during a tune cancels it with prior state restored.
-                abort_tune();
-                long_dispatched = true;
-            }
-            if (long_dispatched) {
-                // Any press action clears the persistent guard chip and
-                // shows the brief cancel notice.
-                clear_tune_notice();
-                show_tune_cancel_notice();
-            }
-        } else {
-            // Release: a tap advances the circle. Release never aborts an
-            // active capture — a natural long press (0.5-1.4 s) must run the
-            // capture to completion.
-            if (!long_dispatched) {
-                handle_button_tap();
-            }
+    switch (btn_a.update(digitalRead(PIN_BUTTON_CAPTURE_TUNE) == LOW, now_ms)) {
+    case DebouncedButton::PRESSED:
+        // A press cancels in-flight capture/tune (atomic: the old profile
+        // is kept; a tune restores prior state). The press is consumed so
+        // it cannot also dispatch a tap or hold.
+        if (nr1_noise_learning) {
+            abort_noise_capture();
+            btn_a.consume();
+            clear_tune_notice();
+            show_tune_cancel_notice();
+        } else if (tune_active) {
+            abort_tune();
+            btn_a.consume();
+            clear_tune_notice();
+            show_tune_cancel_notice();
+        } else if (current_mode != 1) {
+            // No function outside Spectral: brief hint, press consumed.
+            btn_a.consume();
+            clear_tune_notice();
+            show_spectral_only_notice();
         }
+        break;
+    case DebouncedButton::TAP:
+        handle_a_tap();
+        break;
+    case DebouncedButton::HOLD:
+        handle_a_hold();
+        break;
+    default:
+        break;
     }
-    if (button_stable && !long_dispatched &&
-        millis() - press_started_at >= LONG_PRESS_MS) {
-        long_dispatched = true;  // consumed: the release never dispatches a tap
-        handle_button_hold();
+    switch (btn_b.update(digitalRead(PIN_BUTTON_TONE_KILLER) == LOW, now_ms)) {
+    case DebouncedButton::TAP:
+        handle_b_tap();
+        break;
+    default:
+        break;
     }
+    switch (btn_c.update(digitalRead(PIN_BUTTON_POST_FILTER) == LOW, now_ms)) {
+    case DebouncedButton::TAP:
+        handle_c_tap();
+        break;
+    default:
+        break;
+    }
+    (void)btn_d.update(digitalRead(PIN_BUTTON_RESERVED) == LOW, now_ms);
 
     // ── End NR1 noise capture after 1 second (atomic adopt) ─────────────────
 
@@ -872,20 +929,47 @@ void apply_params() {
     if (nr1) specbleach_load_parameters(nr1, params);
 }
 
-// ── Feature helpers ──────────────────────────────────────────────────────────
+// ── Button actions (controls expansion) ──────────────────────────────────────
 
-void advance_feature_circle() {
-    const bool tk = params.tone_kill_enabled;
-    const bool pp = params.post_filter_enabled;
-    if (!tk && !pp) {
-        params.tone_kill_enabled = true;          // none -> TK
-    } else if (tk && !pp) {
-        params.post_filter_enabled = true;        // TK -> TK+PP
-    } else if (tk && pp) {
-        params.tone_kill_enabled = false;         // TK+PP -> PP
+void handle_a_tap() {
+    // NR1: sample the noise floor (1 s, atomic — the old profile survives
+    // until the new capture completes). Non-NR1 presses never reach here:
+    // they are consumed at the press edge with the SPECTRAL ONLY hint.
+    if (current_mode != 1 || nr1_noise_learning || tune_active) return;
+    clear_tune_notice();
+    start_noise_capture();
+}
+
+void handle_a_hold() {
+    // NR1: auto-tune. A direct tune needs a cached profile and ring from a
+    // previous capture this power-on; on a cold boot (none yet) fall back
+    // to a fresh capture and let the completion chain start the tune.
+    if (current_mode != 1 || nr1_noise_learning || tune_active) return;
+    clear_tune_notice();
+    if (nr1_cached_profile) {
+        start_tune();
     } else {
-        params.post_filter_enabled = false;       // PP -> none
+        start_noise_capture();
     }
+}
+
+void handle_b_tap() {
+    // TK toggle — all modes. Orthogonal to the tune latch and the four tune
+    // parameters. The bypass notch processor is armed/disarmed here; in the
+    // NR modes the loop's diff-applier pushes the flag into the denoiser.
+    if (nr1_noise_learning || tune_active) return;  // busy: A owns cancel
+    clear_tune_notice();
+    params.tone_kill_enabled = !params.tone_kill_enabled;
+    sync_tk_bypass_processor();
+}
+
+void handle_c_tap() {
+    // PP toggle — reshapes the denoiser gain spectrum, so it only has an
+    // effect in NR1/NR2. The flag is global: in Bypass it still toggles and
+    // renders as the armed-but-dormant PP chip (no denoiser, no gain).
+    if (nr1_noise_learning || tune_active) return;  // busy: A owns cancel
+    clear_tune_notice();
+    params.post_filter_enabled = !params.post_filter_enabled;
 }
 
 void sync_tk_bypass_processor() {
@@ -905,38 +989,6 @@ void sync_tk_bypass_processor() {
         tk_bypass = nullptr;
         AudioInterrupts();
     }
-}
-
-void handle_button_tap() {
-    if (nr1_noise_learning) return;  // guarded during capture
-    clear_tune_notice();  // any button action clears the guard chip
-    if (current_mode == 0) {
-        // Bypass: 2-state circle — TK only. PP is unreachable here by design.
-        params.tone_kill_enabled = !params.tone_kill_enabled;
-        sync_tk_bypass_processor();
-    } else {
-        advance_feature_circle();
-    }
-}
-
-void handle_button_hold() {
-    if (nr1_noise_learning) return;
-    clear_tune_notice();  // any button action clears the guard chip
-    if (current_mode == 1) {
-        start_noise_capture();
-    } else if (current_mode == 0) {
-        // Bypass: deliberate clear-all escape hatch for both feature flags
-        // and any completed tune preset (issue 13): the pots govern again.
-        params.tone_kill_enabled = false;
-        params.post_filter_enabled = false;
-        sync_tk_bypass_processor();
-        Serial.println("tk: cleared");
-        if (tuned_latch) {
-            tuned_latch = false;
-            Serial.println("tune: cleared");
-        }
-    }
-    // NR2: hold is a no-op.
 }
 
 void start_noise_capture() {
@@ -1123,11 +1175,19 @@ void show_tune_notice(int mode) {
     // mode 1 = CLIP, 2 = QUIET. Full-screen notice for TUNE_NOTICE_MS; the
     // inverted status chip persists until the next capture/button/mode action.
     tune_notice = mode;
+    fullscreen_notice = mode == 1 ? "CLIP" : "QUIET";
     tune_notice_until = millis() + TUNE_NOTICE_MS;
 }
 
 void show_tune_cancel_notice() {
     // Brief notice only — the persistent chip is untouched.
+    fullscreen_notice = "TUNE CANCELLED";
+    tune_notice_until = millis() + TUNE_CANCEL_NOTICE_MS;
+}
+
+void show_spectral_only_notice() {
+    // Brief full-screen hint; no persistent chip.
+    fullscreen_notice = "SPECTRAL ONLY";
     tune_notice_until = millis() + TUNE_CANCEL_NOTICE_MS;
 }
 
@@ -1227,10 +1287,8 @@ void update_display() {
 
     // Full-screen guard/cancel notice (3 s; 1.5 s for press-cancel). The
     // persistent chip below survives the overlay until the next action.
-    if ((int32_t)(tune_notice_until - millis()) > 0) {
-        const char *notice = tune_notice == 1 ? "CLIP"
-                          : tune_notice == 2 ? "QUIET"
-                          :                    "TUNE CANCELLED";
+    if ((int32_t)(tune_notice_until - millis()) > 0 && fullscreen_notice) {
+        const char *notice = fullscreen_notice;
         display.fillRect(0, 0, 128, 64, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
         display.setCursor((int16_t)((128 - (int16_t)strlen(notice) * 6) / 2), 28);

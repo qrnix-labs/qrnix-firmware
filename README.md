@@ -30,7 +30,10 @@ hardware:
 | A8 | Volume pot | same wiring (new control; breadboard prototype) |
 | D3 | Mode switch — Adaptive | `LOW` selects; center-off = bypass |
 | D4 | Mode switch — Spectral | `LOW` selects; center-off = bypass |
-| D2 | Button | active LOW, internal pullup |
+| D2 | Button A — capture/tune | active LOW, internal pullup; tap = noise capture, hold = auto-tune (Spectral only) |
+| D5 | Button B — tone-kill | active LOW, internal pullup; tap toggles TK, all modes |
+| D6 | Button C — post-filter | active LOW, internal pullup; tap toggles PP, NR1/NR2 (dormant-armed in Bypass) |
+| D9 | Button D — reserved | active LOW, internal pullup; no function in this rev |
 | SDA/SCL | SSD1306 OLED | I²C address `0x3C` (optional device) |
 
 The OLED is optional: if it does not respond at boot, audio processing
@@ -85,7 +88,7 @@ All user-facing logic lives in `src/qrnix.cpp` (~800 lines, single file):
 | Main loop: control reads, serial status | `loop()` |
 | Default/reference parameter values | `set_default_params()`, `apply_params()` |
 | Mode switching (free/recreate of DSP cores) | `activate_mode()`, `read_mode_switch()` |
-| Button behavior (tap = feature circle, hold = noise capture) | `handle_button_tap()`, `handle_button_hold()`, `advance_feature_circle()` |
+| Button behavior (A tap = capture, A hold = tune, B = TK, C = PP) | `handle_a_tap()`, `handle_a_hold()`, `handle_b_tap()`, `handle_c_tap()`, `DebouncedButton` in `loop()` |
 | Auto-tune flow | capture guards + ring in `loop()`, search driver, `start_tune()` / `abort_tune()` / `apply_tune_result()`, catch-window handoff in the knob reads, `src/autotune/` |
 | Tone-kill / post-filter sync in bypass | `sync_tk_bypass_processor()`|
 | OLED screens | `update_boot_splash()`, `update_display()` |
@@ -134,9 +137,10 @@ Auto-tune adds its own lines around the capture/tune flow: `capture: start`,
 `tune: progress NN%`, `tune: lock 0xF` (when the result latches),
 `tune: complete red=… sm=… wh=… ag=… score=…`, `tune: aborted`, the guard
 aborts `tune: abort clip` / `tune: abort quiet`, the catch-window transitions
-`tune: unlock red|sm|wh|ag val=…`, `tune: unlock all - manual`, and the exit
-line `tune: cleared`. While a tune is latched the status line reports the
-tuned values, not the pots.
+`tune: unlock red|sm|wh|ag val=…` and `tune: unlock all - manual` — the
+catch-window unlock is the exit from a latched tune (the clear-all hold was
+dropped with the controls expansion). While a tune is latched the status
+line reports the tuned values, not the pots.
 
 A `CrashReport` printed once after a successful boot describes the previous
 crash retained by the Teensy; repeated healthy status lines after

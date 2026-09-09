@@ -160,6 +160,10 @@ constexpr unsigned long LONG_PRESS_MS = 500;
 // noise band, so I2C codec writes do not happen per loop iteration.
 constexpr unsigned long VOLUME_WRITE_MIN_MS = 50;
 constexpr int VOLUME_HYSTERESIS_LSB = 3;
+// Volume taper: the pot spans 0..-60 dB, linear in dB. The DAC volume
+// register covers 0..-96 dB, so the float range used is 0.375..1.0.
+constexpr float VOLUME_RANGE_DB = 60.0f;
+constexpr float DAC_VOLUME_DB_SPAN = 96.0f;
 
 // ── Debounced buttons (controls expansion) ───────────────────────────────────
 
@@ -357,7 +361,7 @@ void setup() {
     // Output level: dacVolume() attenuates the DAC signal that feeds the
     // line-out pins AND the headphone amp. codec.volume() only drives the
     // headphone amp and has no effect on the line-out (Rev D).
-    codec.dacVolume(0.65);
+    codec.dacVolume(0.65);  // ≈ -33 dB, ~44% rotation on the -60..0 dB taper
     // The driver's enable() leaves the headphone amp at minimum volume
     // (0x7F7F) and flagged muted; set a sane ~0 dB amp gain so headphones
     // follow the same dacVolume pot as the line-out.
@@ -461,9 +465,11 @@ void loop() {
     // Volume (A8) — standalone output control, never a tune parameter:
     // independent of the tuned_latch / catch-window logic above and below.
     // dacVolume(0.65) in setup() is the pre-loop default; the first
-    // committed read replaces it. DAC volume is 0.5 dB digital steps over
-    // the whole signal path (line-out + headphone), so a linear pot gives
-    // a conventional audio-taper feel.
+    // committed read replaces it.
+    // Taper: the pot spans 0 dB (full scale) down to -60 dB, linear in dB
+    // (the register is linear in dB over 0.375..1.0 float), so equal
+    // rotation = equal loudness steps. The earlier 0..-96 dB span squashed
+    // the audible range into the top ~10% of the rotation.
     static bool vol_init = false;
     static uint16_t last_vol_raw = 0;
     static unsigned long last_vol_write = 0;
@@ -477,8 +483,10 @@ void loop() {
         vol_init = true;
         last_vol_raw = vol_raw;
         last_vol_write = millis();
-        codec.dacVolume(vol_raw * (1.0f / 1023.0f));
-        volume_pct = (int)lroundf(vol_raw * (100.0f / 1023.0f));
+        const float vol_pos = vol_raw * (1.0f / 1023.0f);
+        codec.dacVolume(1.0f - VOLUME_RANGE_DB * (1.0f - vol_pos) *
+                                (1.0f / DAC_VOLUME_DB_SPAN));
+        volume_pct = (int)lroundf(vol_pos * 100.0f);
     }
     if (tuned_latch && !tune_active) {
         // Catch-window handoff (issue 12): each pot that parks inside its
